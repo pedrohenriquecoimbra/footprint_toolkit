@@ -106,7 +106,24 @@ def test_wrapper_aggregates_to_footprint_by_default():
     result = core.wrapper(_frame(), model="kljun2015", **SMALL)
     assert isinstance(result, Footprint)
     assert result.is_climatology
-    assert result.attrs["model_used"] == "kljun2015"
+    assert result.attrs["model"] == "kljun2015"
+    assert "model_used" not in result.attrs   # the legacy duplicate key is gone
+
+
+def test_wrapper_resolves_callable_model_to_name():
+    # A dummy model that does NOT stamp attrs["model"] itself, so this test
+    # actually exercises the wrapper's callable->name resolution.
+    def dummy(*, dx, time=None, tower=None, tower_crs=None, **kw):
+        return Footprint.from_grid(np.ones((5, 5)), dx=dx, time=time, n=1)
+
+    result = core.wrapper(_frame(), model=dummy, aggregate=False, **SMALL)
+    assert all(fp.attrs["model"] == "dummy" for fp in result)
+
+
+def test_wrapper_carries_provenance_onto_climatology():
+    df = _frame().drop(columns=["v_sigma"])   # v_sigma -> estimated from ustar
+    result = core.wrapper(df, model="kljun2015", **SMALL)
+    assert "v_sigma" in result.attrs["estimated_inputs"]
 
 
 def test_wrapper_returns_series_when_not_aggregated():

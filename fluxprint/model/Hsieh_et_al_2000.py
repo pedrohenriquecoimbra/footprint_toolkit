@@ -93,7 +93,8 @@ def calc_ffp_climatology(ustar, mo_length, v_sigma, z0, zm, wind_dir, smooth_dat
         # Normalize and smooth footprint climatology
         clim_ffp.fclim_2d = clim_ffp.fclim_2d / clim_ffp.n
 
-        if smooth_data is not None:
+        # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
+        if smooth_data:
             skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
             clim_ffp.fclim_2d = sg.convolve2d(
                 clim_ffp.fclim_2d, skernel, mode='same')

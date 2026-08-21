@@ -184,10 +184,17 @@ class Footprint:
         return float(self.x[ix]), float(self.y[iy])
 
     def normalized(self) -> "Footprint":
-        """Return a copy whose field integrates to one over the domain."""
-        scale = np.nansum(self.f)
+        """Return a copy whose field integrates to one over the domain.
+
+        The field is divided by :meth:`total` (``sum(f) * dx * dy``), so the
+        result is a density in ``m**-2`` whose *integral* -- not its sum -- is
+        one.
+        """
+        scale = self.total()
         if scale == 0:
-            raise ValueError("Cannot normalize a footprint that sums to zero.")
+            raise ValueError(
+                "Cannot normalize a footprint whose integral is zero (empty "
+                "field, or a degenerate single-row/column grid).")
         return self._replace(f=self.f / scale)
 
     # -- construction ------------------------------------------------------ #
@@ -362,8 +369,32 @@ class Footprint:
         return cls(f=band, x=x, y=np.sort(y), crs=crs)
 
     # -- internals --------------------------------------------------------- #
+    @staticmethod
+    def _coerce_attr(value: Any) -> Any:
+        """Coerce an attrs value to a NetCDF-safe type (str/number/array).
+
+        Timestamps become ISO strings and anything exotic falls back to
+        ``str``; without this, e.g. a ``pd.Timestamp`` group label makes
+        ``to_netcdf`` fail on the documented by-timestamp batch workflow.
+        """
+        if isinstance(value, datetime):  # covers pd.Timestamp (a subclass)
+            return value.isoformat()
+        if isinstance(value, np.datetime64):
+            return str(value)
+        # netCDF attrs have no boolean type; np.bool_ is an np.generic that
+        # xarray rejects, so it must be caught before the pass-through branch.
+        if isinstance(value, (bool, np.bool_)):
+            return int(value)
+        if isinstance(value, (str, bytes, int, float, np.ndarray, np.generic)):
+            return value
+        if isinstance(value, (list, tuple)) and all(
+                isinstance(v, (str, int, float, np.generic)) for v in value):
+            return [Footprint._coerce_attr(v) for v in value]
+        return str(value)
+
     def _serializable_attrs(self) -> dict[str, Any]:
-        out = dict(self.attrs)
+        out = {k: self._coerce_attr(v)
+               for k, v in self.attrs.items() if v is not None}
         if self.crs is not None:
             out.setdefault("crs", self.crs)
             try:  # enrich with wkt/proj4 when pyproj is available
@@ -544,10 +575,21 @@ class FootprintSeries:
             fclim = sg.convolve2d(fclim, kernel, mode="same")
         counts = [fp.n for fp in self.footprints if fp.n is not None]
         ref = self.footprints[0]
+        # Carry provenance the members agree on (e.g. 'model',
+        # 'estimated_inputs') onto the climatology; per-member values (e.g.
+        # 'group', 'captured_fraction') are dropped rather than fabricated.
+        attrs = {}
+        for key, value in ref.attrs.items():
+            try:
+                if all(bool(np.all(fp.attrs.get(key) == value))
+                       for fp in self.footprints):
+                    attrs[key] = value
+            except (TypeError, ValueError):
+                continue
         return Footprint(
             f=fclim, x=ref.x.copy(), y=ref.y.copy(), time=None, crs=ref.crs,
             tower=ref.tower, tower_crs=ref.tower_crs,
-            n=int(sum(counts)) if counts else None)
+            n=int(sum(counts)) if counts else None, attrs=attrs)
 
     def georeference(self, target_crs: str | None = None) -> "FootprintSeries":
         """Georeference every member onto the same projected grid.

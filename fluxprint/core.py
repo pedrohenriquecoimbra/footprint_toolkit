@@ -30,10 +30,31 @@ from . import micrometeorology
 logger = logging.getLogger('fluxprint.core')
 
 
+class _ProcessedInputs(dict):
+    """Processed model inputs, with estimation metadata out-of-band.
+
+    Behaves exactly like the plain dict it used to be (so e.g.
+    ``pd.DataFrame(inputs)`` keeps working); ``.estimated`` lists the names of
+    the variables that were filled by an estimator.
+    """
+
+    def __init__(self, *args, estimated=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.estimated = list(estimated)
+
+
 def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables=True,
-                             fill_all=True, **kwargs):
+                             fill_all=False, **kwargs):
     """
     Process input values for footprint calculation.
+
+    Missing variables are estimated from the available ones when
+    ``estimate_missing_variables`` is enabled (physically grounded estimates
+    only). Crude constant fallbacks (e.g. ``wind_dir=0``, ``zm=30``,
+    ``pblh=1000``) fabricate scientifically meaningful inputs, so they require
+    an explicit ``fill_all=True`` opt-in; each one emits a ``UserWarning``.
+    The names of every estimated variable are available on the returned
+    mapping's ``.estimated`` attribute.
 
     Parameters:
         data (pd.DataFrame, optional): A DataFrame containing the required columns.
@@ -45,13 +66,13 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     # Define the required keys
     required_keys = ['zm', 'z0', 'umean', 'ustar',
                      'pblh', 'mo_length', 'v_sigma', 'wind_dir'] + keep_cols
-    aka_keys = {'wind_dir': ['wd'],
-                'v_sigma': ['sigmav', 'v_sd'],
+    aka_keys = {'wind_dir': ['wd', 'wind_direction'],
+                'v_sigma': ['sigmav', 'v_sd', 'sigma_v'],
                 'ustar': ['u*'],
-                'umean': ['ws', 'ws_f'],
-                'mo_length': ['ol'],
+                'umean': ['ws', 'ws_f', 'wind_speed'],
+                'mo_length': ['ol', 'l'],
                 'pblh': ['blh']}
-    core_keys = ['zm', 'umean', 'wind_dir']
+    core_keys = ['zm', 'wind_dir']
     optional_keys = ['z0', 'umean'] + keep_cols
     # optional_keys = [] + keep_cols
 
@@ -97,7 +118,31 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
             if key in kwargs:
                 logger.debug(f'kwargs {key}')
                 inputs[key] = kwargs[key]
-            
+
+        # Met drivers consumed only by the estimators (e.g. the Obukhov length
+        # from USTAR/H/TA/PA in FLUXNET/ICOS tables); never forwarded to the
+        # models. 'H' (sensible heat flux, W m-2) is matched case-sensitively
+        # so a lowercase 'h' column (FFP's name for the boundary-layer height)
+        # is never mistaken for it. TA is degC, PA is kPa.
+        for key, aliases, exact in (('H', ['H', 'H_F'], True),
+                                    ('TA', ['TA', 'TA_F'], False),
+                                    ('PA', ['PA', 'PA_F'], False)):
+            # An explicit None kwarg means "not available": fall through to
+            # the column scan instead of feeding None to the estimators.
+            if kwargs.get(key) is not None:
+                inputs[key] = kwargs[key]
+                continue
+            for name in aliases:
+                if exact:
+                    matching_columns = [c for c in data.columns if c == name]
+                else:
+                    pattern = re.compile(f'^{name}$', re.IGNORECASE)
+                    matching_columns = [c for c in data.columns
+                                        if pattern.match(c)]
+                if matching_columns:
+                    inputs[key] = data[matching_columns[0]].tolist()
+                    break
+
     elif data is not None and isinstance(data, dict):
         # If DataFrame provided is a dict like kwargs
         data = {k: v for k, v in data.items() if v not in (None, '', [], {}, ())}
@@ -108,20 +153,26 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # If no DataFrame is provided, use kwargs
         inputs = kwargs
 
-    # Estimate missing inputs when enabled, in dependency order. `fill_all` also
-    # allows crude constant fallbacks (e.g. zm, umean, wind_dir) and the rough
+    # Estimate missing inputs when enabled, in dependency order (mo_length
+    # before z0: the z0 estimate needs a real Obukhov length). `fill_all` also
+    # allows crude constant fallbacks (zm, umean, wind_dir, pblh) and the rough
     # ustar estimate; with fill_all=False only physical estimates are applied.
+    estimated = []
     if estimate_missing_variables:
-        for key in ('zm', 'umean', 'wind_dir', 'pblh', 'ustar', 'z0',
-                    'mo_length', 'v_sigma'):
+        for key in ('zm', 'umean', 'wind_dir', 'ustar', 'mo_length', 'pblh',
+                    'z0', 'v_sigma'):
             if inputs.get(key) is not None:
                 continue
             value = micrometeorology.filler(inputs, key, fill_all=fill_all)
             if value is not None:
                 inputs[key] = value
+                estimated.append(key)
 
-    # Core inputs are mandatory (after any estimation).
+    # Core inputs are mandatory (after any estimation), and the models need
+    # either z0 or umean (z0 takes precedence when both are present).
     missing_keys = [key for key in core_keys if inputs.get(key) is None]
+    if inputs.get('z0') is None and inputs.get('umean') is None:
+        missing_keys.append('z0 or umean')
     if missing_keys:
         raise ValueError(
             f"Missing required inputs: {missing_keys}. Provide them, or enable "
@@ -132,7 +183,10 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     missing_keys = [key for key in required_keys
                     if key not in optional_keys and inputs.get(key) is None]
     if missing_keys:
-        raise ValueError(f"Missing required inputs: {missing_keys}.")
+        raise ValueError(
+            f"Missing required inputs: {missing_keys}. Provide them, or enable "
+            f"approximation (estimate_missing_variables=True; set fill_all=True "
+            f"for crude constant fallbacks).")
     
     # Get the maximum length of the inputs
     max_len_inputs = max(len(v) if isinstance(
@@ -149,7 +203,7 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
             inputs[key] = [value]*max_len_inputs
 
     logger.debug(f'inputs: {inputs}')
-    return inputs
+    return _ProcessedInputs(inputs, estimated=estimated)
 
 
 def _resolve_model(model):
@@ -199,6 +253,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     :meth:`FootprintSeries.aggregate` for a climatology, or index the series for
     individual footprints.
 
+    Per-member smoothing defaults to off here (``smooth_data=0``) because
+    :meth:`FootprintSeries.aggregate` smooths the climatology once, matching
+    the reference FFP procedure; direct model calls keep their own default.
+    Any estimated inputs are recorded in each footprint's
+    ``attrs["estimated_inputs"]``.
+
     Args:
         data: A DataFrame, a dict of equal-length sequences, or a URL string.
         by: Column name (or list of names) to group rows by; ``None`` for one group.
@@ -229,12 +289,17 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     keep_cols = (list(by) if isinstance(by, (list, tuple))
                  else [by] if isinstance(by, str) else [])
     inputs = process_footprint_inputs(data=data, keep_cols=keep_cols, **kwargs)
+    estimated = getattr(inputs, "estimated", [])
 
     grouped = ([(None, inputs)] if by is None
                else pd.DataFrame(inputs).groupby(by))
 
+    # Per-member smoothing is off in the batch path: the reference FFP
+    # procedure smooths the *climatology* once (see FootprintSeries.aggregate),
+    # and smoothing both the members and the aggregate widens the footprint.
+    # Pass smooth_data=1 explicitly to override.
     grid_defaults = {"domain": [-500, 500, -500, 500], "dx": 10,
-                     "verbosity": 0}
+                     "smooth_data": 0, "verbosity": 0}
     overrides = {k: v for k, v in kwargs.items() if k in _MODEL_KEYS}
 
     footprints: list[Footprint] = []
@@ -247,10 +312,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
                 **{k: v for k, v in group.items() if k in _MODEL_KEYS}}
         try:
             fp = model_fn(tower=tower, tower_crs=tower_crs, time=time, **call)
-        except Exception:
+        except Exception as exc:
             # A failed group is skipped, never silently backfilled with another
             # group's footprint. Re-raise instead of `continue` to abort instead.
-            logger.exception("Footprint failed for group %r; skipping.", key)
+            logger.debug("Traceback for failed group %r:", key, exc_info=True)
+            logger.warning("Footprint failed for group %r (%s); skipping.",
+                           key, exc)
             skipped += 1
             continue
         if getattr(fp, "n", None) == 0:
@@ -258,15 +325,21 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
             skipped += 1
             continue
         if label is not None:
+            if isinstance(label, (pd.Timestamp, datetime)):
+                # Keep attrs NetCDF-serializable: a raw Timestamp in attrs
+                # makes to_netcdf fail on the documented by-timestamp workflow.
+                label = pd.Timestamp(label).isoformat()
             fp.attrs.setdefault("group", label)
+        if estimated:
+            fp.attrs.setdefault("estimated_inputs", list(estimated))
         footprints.append(fp)
 
     if not footprints:
         raise ValueError(
             "No footprints could be calculated from the provided data.")
     if skipped:
-        logger.info("Skipped %d of %d group(s).",
-                    skipped, skipped + len(footprints))
+        logger.warning("Skipped %d of %d group(s).",
+                       skipped, skipped + len(footprints))
     return FootprintSeries(footprints)
 
 
@@ -328,10 +401,14 @@ def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
     series = calculate_footprint(*args, **kwargs)
     result = series.aggregate() if aggregate else series
 
-    # Metadata lives on Footprints (a series has no attrs of its own).
+    # Metadata lives on Footprints (a series has no attrs of its own). Resolve
+    # a callable/module model to a name so attrs stay NetCDF-serializable.
+    model = kwargs.get("model", "kljun2015")
+    model_name = model if isinstance(model, str) else \
+        getattr(model, "__name__", type(model).__name__)
     targets = result.footprints if isinstance(result, FootprintSeries) else [result]
     for fp in targets:
-        fp.attrs.setdefault("model_used", kwargs.get("model", "kljun2015"))
+        fp.attrs.setdefault("model", model_name)
         if meta:
             fp.attrs.update(meta)
 
@@ -375,7 +452,8 @@ def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
 
     fclim_clim = np.nanmean(fclim_2d, axis=0)
 
-    if smooth_data is not None:
+    # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
+    if smooth_data:
         skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
         fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
         fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')

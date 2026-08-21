@@ -1,11 +1,36 @@
 """
 Exceptions
 
-For original code see  Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid, 2015: 
+For original code see  Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid, 2015:
 The simple two-dimensional parameterisation for Flux Footprint Predictions FFP.
 Geosci. Model Dev. 8, 3695-3713, doi:10.5194/gmd-8-3695-2015, for details.
 contact: natascha.kljun@cec.lu.se
 """
+import logging
+import numbers
+
+import numpy as np
+
+logger = logging.getLogger('fluxprint.exceptions')
+
+__all__ = ['FluxPrintError', 'InputValidationError', 'exTypes', 'exceptions',
+           'check_ffp_inputs', 'raise_ffp_exception']
+
+
+class FluxPrintError(Exception):
+    """Base class for all fluxprint errors."""
+
+
+class InputValidationError(FluxPrintError, ValueError):
+    """A model input failed validation.
+
+    ``code`` is the numeric code from the FFP exception table, when applicable.
+    """
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
 
 exTypes = {'message': 'Message',
            'alert': 'Alert',
@@ -74,11 +99,27 @@ exceptions = [
     {'code': 20,
      'type': exTypes['error'],
      'msg': 'zm (measurement height) must be above roughness sub-layer (12.5*z0).'},
+    {'code': 21,
+     'type': exTypes['error'],
+     'msg': 'Missing or non-finite input (None, NaN or inf). Skipping current footprint.'},
 ]
 
 
+def _is_finite_number(value):
+    return (isinstance(value, numbers.Number)
+            and bool(np.isfinite(value)))
+
+
 def check_ffp_inputs(ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer, verbosity):
-    # Check passed values for physical plausibility and consistency
+    # Check passed values for physical plausibility and consistency.
+    # Reject missing/non-finite records first: every comparison below is False
+    # for NaN, so without this guard a NaN record would sail through validation
+    # and silently poison the composited footprint.
+    required = [ustar, sigmav, h, ol, wind_dir, zm,
+                umean if z0 is None else z0]
+    if not all(_is_finite_number(val) for val in required):
+        raise_ffp_exception(21, verbosity)
+        return False
     if zm <= 0.:
         raise_ffp_exception(2, verbosity)
         return False
@@ -118,28 +159,25 @@ def check_ffp_inputs(ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer, ver
 
 
 def raise_ffp_exception(code, verbosity=1):
-    '''Raise exception or prints message according to specified code'''
+    """Raise (fatal codes) or report (alert/error codes) an FFP exception.
 
+    Fatal codes raise :class:`InputValidationError` carrying the full message
+    regardless of ``verbosity`` -- verbosity gates console printing only, never
+    the message content. Error codes are logged at warning level (visible once
+    the application configures logging); routine alerts/messages at info
+    level. Non-fatal codes are also printed when ``verbosity > 1``.
+    """
     ex = [it for it in exceptions if it['code'] == code][0]
     string = ex['type'] + '(' + str(ex['code']).zfill(4) + '):\n ' + ex['msg']
 
-    if verbosity > 0:
-        print('')
-
     if ex['type'] == exTypes['fatal']:
-        if verbosity > 0:
-            string = string + '\n FFP_fixed_domain execution aborted.'
-        else:
-            string = ''
-        raise Exception(string)
-    elif ex['type'] == exTypes['alert']:
-        string = string + '\n Execution continues.'
-        if verbosity > 1:
-            print(string)
-    elif ex['type'] == exTypes['error']:
-        string = string + '\n Execution continues.'
-        if verbosity > 1:
-            print(string)
-    else:
-        if verbosity > 1:
-            print (string)
+        raise InputValidationError(
+            string + '\n FFP_fixed_domain execution aborted.', code=code)
+
+    string = string + '\n Execution continues.'
+    if ex['type'] == exTypes['error']:
+        logger.warning('%s', string)
+    else:  # routine alerts/messages must not read like data problems
+        logger.info('%s', string)
+    if verbosity > 1:
+        print(string)

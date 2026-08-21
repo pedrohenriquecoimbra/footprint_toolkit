@@ -70,9 +70,12 @@ def test_peak_xy_at_origin():
     assert _toy().peak_xy() == (0.0, 0.0)
 
 
-def test_normalized_integrates_to_unit_sum():
-    fp = Footprint.from_grid(np.array([[1.0, 3.0]]), dx=2.0)
-    assert np.nansum(fp.normalized().f) == pytest.approx(1.0)
+def test_normalized_integrates_to_one():
+    # The *integral* (sum * dx * dy) is one, honouring the documented contract;
+    # the plain sum is 1/(dx*dy).
+    fp = Footprint.from_grid(np.array([[1.0, 3.0], [2.0, 2.0]]), dx=2.0)
+    assert fp.normalized().total() == pytest.approx(1.0)
+    assert np.nansum(fp.normalized().f) == pytest.approx(1.0 / 4.0)
 
 
 def test_is_climatology_flag():
@@ -286,3 +289,29 @@ def test_to_netcdf_packing_roundtrips(tmp_path):
     fp.to_netcdf(str(path), decimals=6, engine=engine)
     out = Footprint.from_netcdf(str(path), engine=engine)
     assert np.allclose(out.f, fp.f, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# NetCDF-safe attrs coercion / aggregate provenance                           #
+# --------------------------------------------------------------------------- #
+def test_coerce_attr_handles_numpy_bool_and_timestamps():
+    # np.bool_ is an np.generic that netCDF writers reject; it must become int.
+    assert Footprint._coerce_attr(np.bool_(True)) == 1
+    assert not isinstance(Footprint._coerce_attr(np.bool_(True)), np.bool_)
+    assert Footprint._coerce_attr([np.bool_(True), np.bool_(False)]) == [1, 0]
+    assert Footprint._coerce_attr(datetime(2024, 4, 24)) == "2024-04-24T00:00:00"
+    assert Footprint._coerce_attr(object()).startswith("<object")
+
+
+def test_aggregate_carries_shared_attrs_and_drops_per_member_ones():
+    fps = []
+    for i in range(2):
+        fp = Footprint.from_grid(np.ones((3, 3)), dx=10.0, n=1, time=float(i))
+        fp.attrs.update({"model": "kljun2015",
+                         "estimated_inputs": ["v_sigma"],
+                         "group": f"g{i}"})
+        fps.append(fp)
+    clim = FootprintSeries(fps).aggregate(smooth=False)
+    assert clim.attrs["model"] == "kljun2015"
+    assert clim.attrs["estimated_inputs"] == ["v_sigma"]
+    assert "group" not in clim.attrs          # differs per member -> dropped

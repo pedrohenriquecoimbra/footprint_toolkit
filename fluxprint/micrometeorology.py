@@ -3,9 +3,11 @@
 Approximations come in two tiers:
 
 * **essential** - physically grounded estimates derived from other inputs
-  (``z0``, ``mo_length``, ``pblh``, ``v_sigma``);
-* **filler** - crude constant fallbacks (``zm``, ``umean``, ``wind_dir``) and a
-  rough ``ustar``, applied only when ``fill_all`` is enabled.
+  (``z0``, ``mo_length``, ``v_sigma``);
+* **filler** - crude constant fallbacks (``zm``, ``umean``, ``wind_dir``,
+  ``pblh``) and a rough ``ustar``, applied only when ``fill_all`` is enabled.
+  Every constant fallback emits a :class:`UserWarning` naming the fabricated
+  value.
 
 :func:`filler` returns an estimated value for a variable, or ``None`` when no
 estimator applies, an estimator's inputs are unavailable, or its tier is
@@ -15,6 +17,7 @@ missing.
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Mapping
 from typing import Any
 
@@ -97,7 +100,12 @@ def compute_mo_length(ustar, H, theta=None, TA=None, PA=None, k=0.4, g=9.81,
     rho = (np.asarray(PA) * 1000.0) / (Rd * T_K)
     # Kinematic (buoyancy) heat flux w'theta' [K m s-1].
     w_theta = np.asarray(H) / (rho * cp)
-    return -(np.asarray(ustar) ** 3) * theta / (k * g * w_theta)
+    with np.errstate(divide="ignore"):
+        mo_length = -(np.asarray(ustar) ** 3) * theta / (k * g * w_theta)
+    # H = 0 (neutral) gives |L| -> inf; clamp to a large finite value so the
+    # record is treated as the neutral limit (|L| > 5000 in the models) rather
+    # than rejected as non-finite.
+    return np.clip(mo_length, -1e6, 1e6)
 
 
 @register("v_sigma", ESTIMATORS, "Std. dev. of lateral velocity from ustar")
@@ -115,13 +123,15 @@ def compute_ustar(umean, zm, z0=0.1, k=0.4):
 def _essential() -> dict[str, tuple]:
     # variable -> (constant value | callable(data), required input keys)
     return {
+        # z0 requires a real Obukhov length: a defaulted ol here (formerly
+        # ol=1 m, extreme stability) made psi_f huge and z0 astronomically
+        # wrong. Estimation order in core computes mo_length before z0.
         "z0": (lambda d: compute_z0(d["umean"], d["ustar"], d["zm"],
-                                    ol=d.get("mo_length", 1)),
-               ("umean", "ustar", "zm")),
+                                    ol=d["mo_length"]),
+               ("umean", "ustar", "zm", "mo_length")),
         "mo_length": (lambda d: compute_mo_length(d["ustar"], d["H"],
                                                   TA=d["TA"], PA=d["PA"]),
                       ("ustar", "H", "TA", "PA")),
-        "pblh": (1000.0, ()),
         "v_sigma": (lambda d: compute_std_v(d["ustar"]), ("ustar",)),
     }
 
@@ -133,6 +143,9 @@ def _filler() -> dict[str, tuple]:
         "ustar": (lambda d: compute_ustar(d["umean"], d["zm"], z0=d.get("z0", 0.1)),
                   ("umean", "zm")),
         "wind_dir": (0.0, ()),
+        # A constant boundary-layer height is a crude fallback, not a physical
+        # estimate; it must be opted into via fill_all like the others.
+        "pblh": (1000.0, ()),
     }
 
 
@@ -143,8 +156,8 @@ def filler(data: Mapping[str, Any], variable: str, fill_all: bool = True):
         data: Mapping of inputs already available.
         variable: Name of the variable to estimate.
         fill_all: Also allow crude constant fallbacks (``zm``/``umean``/
-            ``wind_dir``) and the rough ``ustar`` estimate. With ``False`` only
-            physically grounded ("essential") estimates are used.
+            ``wind_dir``/``pblh``) and the rough ``ustar`` estimate. With
+            ``False`` only physically grounded ("essential") estimates are used.
 
     Returns:
         The estimated value, or ``None`` when unavailable/disabled.
@@ -155,14 +168,18 @@ def filler(data: Mapping[str, Any], variable: str, fill_all: bool = True):
         return None
 
     spec, needs = entry
-    if not all(key in data for key in needs):
+    # Present-but-None counts as unavailable (callers commonly pass None for
+    # absent variables); dereferencing it would crash the estimator.
+    if any(data.get(key) is None for key in needs):
         logger.debug("Cannot estimate %r: missing inputs %s.",
-                     variable, [k for k in needs if k not in data])
+                     variable, [k for k in needs if data.get(k) is None])
         return None
 
     if callable(spec):
         return spec(data)
-    logger.warning("Using crude fallback for missing %r: %s", variable, spec)
+    message = f"Using crude fallback for missing {variable!r}: {spec}"
+    logger.warning("%s", message)
+    warnings.warn(message, UserWarning, stacklevel=2)
     return spec
 
 

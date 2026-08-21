@@ -196,13 +196,13 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     xmin, xmax, ymin, ymax = domain
 
     # Define rslayer if not passed
-    if rslayer == None: rslayer == 0
+    if rslayer is None: rslayer = 0
 
     # Define smooth_data if not passed
-    if smooth_data == None: smooth_data == 1
+    if smooth_data is None: smooth_data = 1
 
     # Define crop if not passed
-    if crop == None: crop == 0
+    if crop is None: crop = 0
 
     # Define pulse if not passed
     if pulse == None:
@@ -253,7 +253,7 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
 
         # Counter
         if verbosity > 1 and ix % pulse == 0:
-            logger.info('Calculating footprint ', ix+1, ' of ', ts_len)
+            logger.info('Calculating footprint %d of %d', ix + 1, ts_len)
 
         valids[ix] = check_ffp_inputs(ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean, rslayer, verbosity)
 
@@ -337,7 +337,9 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
         # Normalize and smooth footprint climatology
         fclim_2d = fclim_2d / n
 
-        if smooth_data is not None:
+        # Truthiness, not `is not None`: smooth_data=0 must actually disable
+        # smoothing as documented (it used to smooth anyway).
+        if smooth_data:
             skernel  = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
             fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
             fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
@@ -904,7 +906,20 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
 
     x = np.asarray(out.x_2d)[0, :]
     y = np.asarray(out.y_2d)[:, 0]
-    return Footprint(
+    fp = Footprint(
         f=np.asarray(out.fclim_2d), x=x, y=y, time=time,
         tower=tower, tower_crs=tower_crs, n=int(out.n),
         attrs={"model": "kljun2015", "flag_err": int(out.flag_err)})
+    if fp.n:
+        # The grid integral of the full footprint is 1 by construction, so the
+        # captured fraction diagnoses how much flux the domain truncates. It is
+        # computed on the returned field, so with smooth_data=1 it also
+        # includes the ~1% border mass the smoothing kernel loses.
+        captured = fp.total()
+        fp.attrs["captured_fraction"] = float(captured)
+        if captured < 0.8:
+            logger.warning(
+                "Footprint domain captures only %.0f%% of the flux; source-"
+                "area fractions above that are unreachable. Enlarge `domain` "
+                "(or reduce `dx`) to capture more.", captured * 100)
+    return fp

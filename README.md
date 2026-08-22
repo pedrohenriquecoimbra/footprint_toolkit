@@ -84,7 +84,10 @@ data = pd.read_csv("halfhours.csv", na_values=[-9999])  # FLUXNET-style table
 
 climatology = fluxprint.wrapper(
     data=data,
-    zm=20.0,                        # aerodynamic height: z - d, see note below
+    zm=20.0,       # aerodynamic height: z - d, see note below
+    pblh=1500.0,   # boundary-layer height [m] - not in FLUXNET tables, so
+                   # supply it (or a PBLH/BLH column, or opt into the crude
+                   # 1000 m constant with fill_all=True)
     tower=(4321000.0, 3210000.0),   # tower position, for georeferencing
     tower_crs="EPSG:3035",
     dst="climatology.nc",           # optional: write the result
@@ -92,11 +95,13 @@ climatology = fluxprint.wrapper(
 ```
 
 Columns are matched case-insensitively with common aliases (`USTAR`/`u*`,
-`WD`/`wind_direction`, `WS`/`wind_speed`, `OL`/`L`, `SIGMA_V`/`v_sd`, ...).
-Missing variables are estimated when physically possible — e.g. the Obukhov
-length from `USTAR`/`H`/`TA`/`PA` — and every estimated variable is recorded in
-the result's `attrs["estimated_inputs"]`. Crude constant fallbacks require an
-explicit `fill_all=True` and warn loudly.
+`WD`/`wind_direction`, `WS`/`wind_speed`, `OL`/`L`, `SIGMA_V`/`v_sd`, ...;
+`H`, the sensible heat flux, is matched exactly so FFP's lowercase `h` — the
+boundary-layer height — is never mistaken for it). Missing variables are
+estimated when physically possible — e.g. the Obukhov length from
+`USTAR`/`H`/`TA`/`PA` — and every estimated variable is recorded in the
+result's `attrs["estimated_inputs"]`. Crude constant fallbacks (including the
+`pblh=1000` constant) require an explicit `fill_all=True` and warn loudly.
 
 Use `fluxprint.calculate_footprint(data, by="timestamp_column", ...)` for one
 footprint per group (a `FootprintSeries`) instead of a single climatology.

@@ -507,7 +507,11 @@ class Footprint:
         )
         ds = ds.assign_coords(**_time_coord(self.time))
         if self.is_georeferenced:
-            ds["spatial_ref"] = _grid_mapping_var(xr, self.crs)
+            # As a *coordinate* (not a data variable) so it stays attached
+            # when the footprint DataArray is selected - rioxarray/GDAL look
+            # it up there.
+            ds = ds.assign_coords(
+                spatial_ref=_grid_mapping_var(xr, self.crs))
             ds["footprint"].attrs["grid_mapping"] = "spatial_ref"
         ds.attrs.update(self._serializable_attrs())
         ds.attrs.setdefault("Conventions", "CF-1.8")
@@ -876,14 +880,22 @@ class FootprintSeries:
         # Carry provenance the members agree on (e.g. 'model',
         # 'estimated_inputs') onto the climatology; per-member values (e.g.
         # 'group', 'captured_fraction') are dropped rather than fabricated.
+        # 'history' is never equality-carried (member timestamps differ by
+        # wall clock); the climatology gets its own fresh entry instead.
         attrs = {}
         for key, value in ref.attrs.items():
+            if key == "history":
+                continue
             try:
                 if all(bool(np.all(fp.attrs.get(key) == value))
                        for fp in self.footprints):
                     attrs[key] = value
             except (TypeError, ValueError):
                 continue
+        from .version import __version__
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        attrs["history"] = (f"{stamp} aggregated {len(self.footprints)} "
+                            f"footprint(s) by fluxprint {__version__}")
         return Footprint(
             f=fclim, x=ref.x.copy(), y=ref.y.copy(), time=None, crs=ref.crs,
             tower=ref.tower, tower_crs=ref.tower_crs,
@@ -942,7 +954,8 @@ class FootprintSeries:
             },
         )
         if self.is_georeferenced:
-            ds["spatial_ref"] = _grid_mapping_var(xr, ref.crs)
+            ds = ds.assign_coords(
+                spatial_ref=_grid_mapping_var(xr, ref.crs))
             ds["footprint"].attrs["grid_mapping"] = "spatial_ref"
         ds.attrs.update({k: v for k, v in ref._serializable_attrs().items()
                          if k != "n_records"})

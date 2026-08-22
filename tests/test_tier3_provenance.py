@@ -146,3 +146,26 @@ def test_crude_zm_constant_still_available_when_heights_absent():
     with pytest.warns(UserWarning, match="crude"):
         value = micrometeorology.filler({}, "zm", fill_all=True)
     assert value == 30.0
+
+
+def test_non_positive_zm_estimate_warns_and_declines():
+    """displacement >= measurement height is a units/metadata mistake; the
+    estimator must warn and decline instead of poisoning every record."""
+    data = {"measurement_height": 5.0, "displacement": 10.0}
+    with pytest.warns(UserWarning, match="non-positive zm"):
+        assert micrometeorology.filler(data, "zm", fill_all=False) is None
+
+
+def test_aggregate_stamps_fresh_history():
+    """'history' must not depend on members computed within the same second."""
+    from fluxprint.footprint import Footprint, FootprintSeries
+
+    fps = []
+    for i in range(2):
+        fp = Footprint.from_grid(np.ones((3, 3)), dx=10.0, n=1, time=float(i))
+        fp.attrs["history"] = f"2026-08-22T00:00:0{i}Z created ..."  # differs
+        fp.attrs["model"] = "kljun2015"
+        fps.append(fp)
+    clim = FootprintSeries(fps).aggregate(smooth=False)
+    assert "aggregated 2 footprint(s)" in clim.attrs["history"]
+    assert clim.attrs["model"] == "kljun2015"

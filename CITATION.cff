@@ -23,4 +23,5 @@ keywords:
   - eddy covariance
   - micrometeorology
 license: EUPL-1.2
-version: 0.3.0
+# Bump together with fluxprint/version.py at each release (add date-released).
+version: 0.2.0

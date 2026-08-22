@@ -6,9 +6,10 @@ import requests
 import pandas as pd
 from io import BytesIO
 from zipfile import ZipFile
-# The heavy geo stack (rasterio, xarray, fiona, shapely) and requests are
-# imported inside the functions that need them, so `import fluxprint` stays
-# light and the optional-extras split remains possible.
+# The heavy geo stack (rasterio, xarray, fiona, shapely) is imported inside
+# the functions that need it, so `import fluxprint` stays light and the
+# optional-extras split remains possible; requests and pandas stay
+# module-level (small, and tests monkeypatch io.requests).
 from .footprint import Footprint, FootprintSeries
 
 logger = logging.getLogger('fluxprint.io')

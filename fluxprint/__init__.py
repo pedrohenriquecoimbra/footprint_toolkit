@@ -24,6 +24,10 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_SUBMODULES))
+
+
 __all__ = [
     *core.__all__,
     *io.__all__,

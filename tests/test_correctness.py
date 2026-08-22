@@ -295,6 +295,41 @@ def test_explicit_none_driver_kwarg_does_not_crash():
         core.process_footprint_inputs(data=data, H=None, pblh=1000.0)
 
 
+def test_ustar_star_alias_matches_literally_and_u_column_does_not():
+    """'u*' is a literal alias, not a regex: it must match a 'u*' column and
+    must NOT swallow a plain 'U' (wind component) column as friction velocity."""
+    pytest.importorskip("rasterio")
+    import pandas as pd
+    from fluxprint import core
+
+    base = {"zm": [10.0], "z0": [0.1], "pblh": [1000.0],
+            "mo_length": [-100.0], "v_sigma": [0.5], "wind_dir": [180.0]}
+
+    inputs = core.process_footprint_inputs(
+        data=pd.DataFrame({**base, "u*": [0.4]}))
+    assert inputs["ustar"] == [0.4]
+
+    with pytest.raises(ValueError, match="ustar"):
+        core.process_footprint_inputs(
+            data=pd.DataFrame({**base, "U": [3.0]}),
+            estimate_missing_variables=False)
+
+
+def test_readme_quickstart_shape_runs():
+    """The README batch example (FLUXNET columns + zm/pblh kwargs) must work."""
+    pytest.importorskip("rasterio")
+    import pandas as pd
+    from fluxprint import core
+
+    data = pd.DataFrame({
+        "USTAR": [0.4] * 2, "WD": [180.0] * 2, "WS": [3.0] * 2,
+        "H": [100.0] * 2, "TA": [20.0] * 2, "PA": [101.3] * 2,
+    })
+    result = core.wrapper(data=data, zm=20.0, pblh=1500.0,
+                          dx=20.0, domain=[-200, 200, -200, 200])
+    assert result.n == 2
+
+
 def test_lowercase_h_column_is_not_mistaken_for_heat_flux():
     """'h' is FFP's name for boundary-layer height, not the heat flux H."""
     pytest.importorskip("rasterio")

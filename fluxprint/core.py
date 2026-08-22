@@ -80,7 +80,7 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         inputs = {}
         for key in required_keys:
             # Create a regex pattern to match the key case-insensitively
-            pattern = re.compile(f'^{key}$', re.IGNORECASE)
+            pattern = re.compile(f'^{re.escape(key)}$', re.IGNORECASE)
             # Find matching columns in the DataFrame, prioritizing exact matches
             matching_columns = [col for col in data.columns if col == key] + [
                 col for col in data.columns if pattern.match(col)]
@@ -93,8 +93,10 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # Use other names variables may be known for (e.g. wind direction, wind_dir, wd)
         for key in required_keys:
             for aka in aka_keys.get(key, []):
-                # Create a regex pattern to match the key case-insensitively
-                pattern = re.compile(f'^{aka}$', re.IGNORECASE)
+                # Escape the alias: 'u*' must match the literal column name,
+                # not act as a quantifier (which would also swallow a plain
+                # 'U'/'u' wind-component column as friction velocity).
+                pattern = re.compile(f'^{re.escape(aka)}$', re.IGNORECASE)
                 # Find matching columns in the DataFrame, prioritizing exact matches
                 matching_columns = [col for col in data.columns if col == key] + [
                     col for col in data.columns if pattern.match(col)]
@@ -136,7 +138,7 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
                 if exact:
                     matching_columns = [c for c in data.columns if c == name]
                 else:
-                    pattern = re.compile(f'^{name}$', re.IGNORECASE)
+                    pattern = re.compile(f'^{re.escape(name)}$', re.IGNORECASE)
                     matching_columns = [c for c in data.columns
                                         if pattern.match(c)]
                 if matching_columns:

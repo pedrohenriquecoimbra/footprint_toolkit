@@ -137,7 +137,18 @@ def _zm_from_heights(d):
         if d.get("canopy_height") is None:
             return None
         displacement = compute_displacement(d["canopy_height"])
-    return np.asarray(d["measurement_height"]) - np.asarray(displacement)
+    zm = np.asarray(d["measurement_height"]) - np.asarray(displacement)
+    if np.any(zm <= 0):
+        # Almost certainly a units or metadata mistake (e.g. cm vs m);
+        # declining lets a crude fallback or a clear missing-zm error surface
+        # instead of silently poisoning every record downstream.
+        warnings.warn(
+            "measurement_height - displacement yields non-positive zm "
+            f"(min {np.min(zm):g} m); check the height inputs' units. "
+            "Ignoring the height-based zm estimate.", UserWarning,
+            stacklevel=2)
+        return None
+    return zm
 
 
 def _essential() -> dict[str, tuple]:

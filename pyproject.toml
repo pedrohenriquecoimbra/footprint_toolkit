@@ -63,7 +63,7 @@ crs = ["pyproj"]
 shapefile = ["fiona", "shapely"]
 viz = ["folium"]
 all = ["xarray", "netcdf4", "rasterio", "pyproj", "fiona", "shapely", "folium"]
-dev = ["pytest"]
+dev = ["pytest", "rioxarray"]  # rioxarray: the CF grid-mapping interop test
 icoscp = ["icoscp", "icoscp_core"]
 
 [project.urls]

@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it as below, together with the paper
+  of the footprint model you used (e.g. Kljun et al. 2015,
+  doi:10.5194/gmd-8-3695-2015 - each output's metadata records the model's
+  citation and DOI).
+title: FluxPrint
+type: software
+authors:
+  - family-names: Herig Coimbra
+    given-names: Pedro Henrique
+    email: pedro-henrique.herig-coimbra@inrae.fr
+    affiliation: ECOSYS, INRAE, AgroParisTech, Universite Paris-Saclay
+repository-code: https://github.com/pedrohenriquecoimbra/fluxprint
+url: https://github.com/pedrohenriquecoimbra/fluxprint
+abstract: >-
+  Flux footprint models for eddy covariance data analysis, behind a single
+  consistent interface: batch processing of half-hourly met tables, typed
+  footprint objects, source-area contours, georeferencing and NetCDF/GeoTIFF/
+  Shapefile export.
+keywords:
+  - flux footprint
+  - eddy covariance
+  - micrometeorology
+license: EUPL-1.2
+version: 0.3.0

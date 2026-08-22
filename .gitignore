@@ -5,4 +5,8 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-sample/*.nc
+.coverage
+.ipynb_checkpoints/
+.vscode/
+*.nc
+*.tif

@@ -8,6 +8,26 @@ and the project aims to follow [Semantic Versioning](https://semver.org/)
 ## [Unreleased]
 
 ### Added
+- Provenance on every model output: `attrs` now carry the fluxprint version,
+  the model's citation/DOI/reference version, the wind-profile input mode,
+  smoothing/rslayer settings and a `history` line; `register_model` accepts
+  citation metadata.
+- CF metadata on NetCDF output: a `Conventions` attribute and, for
+  georeferenced footprints, a CF `grid_mapping` variable (`spatial_ref`) so
+  GDAL/QGIS/rioxarray recognize the CRS.
+- Displacement-height support: pass `measurement_height` with `displacement`
+  (or `canopy_height`, d ~ 0.67 h) and `zm = z - d` is derived; matching
+  column aliases are recognized in tables.
+- Optional extras declared: `fluxprint[netcdf]`, `[tiff]`, `[crs]`,
+  `[shapefile]`, `[viz]` (folium), `[all]`, `[dev]` - making the package's
+  ImportError hints valid. The packages remain core dependencies for now.
+- `netcdf4` added as a dependency (the `.nc` read path always required it).
+- CI: a GitHub Actions matrix (3.10-3.13) plus a dedicated
+  `reference-equivalence` job asserting every registered model reproduces its
+  vendored reference implementation exactly; the INRAE mirror now runs only
+  after both pass. An import-lightness check keeps `import fluxprint` free of
+  the geo stack.
+- `CITATION.cff` and `CONTRIBUTING.md`.
 - `Footprint.contours(rs)`: source-area isopleths (e.g. the 50/80% contours)
   computed directly on the footprint object, with per-contour level, enclosed
   fraction, vertices, and an open/closed flag.
@@ -27,6 +47,15 @@ and the project aims to follow [Semantic Versioning](https://semver.org/)
 - `FluxPrintError` / `InputValidationError` exception hierarchy.
 
 ### Changed
+- `import fluxprint` no longer loads the geo/plotting stack (rasterio,
+  xarray, pyproj, fiona, shapely, matplotlib): those imports are deferred to
+  the operations that need them; `fluxprint.utils` loads lazily on first use.
+- tz-aware timestamps are converted to naive UTC with an explicit warning;
+  fluxprint stores times as naive timestamps (flux networks conventionally
+  use local standard time - document your convention).
+- The vendored Kljun reference code's license notice now ships in the wheel
+  and sdist (PEP 639 `license-files`); `regorator` is version-pinned; the
+  smoothing kernel uses `np.array` instead of the deprecated `np.matrix`.
 - **Crude constant fills are now opt-in**: `fill_all` defaults to `False`, the
   `pblh=1000` constant moved to the crude tier, and every crude fill emits a
   `UserWarning`. Missing `wind_dir`/`zm`/`pblh` now raise a clear error
@@ -76,6 +105,9 @@ and the project aims to follow [Semantic Versioning](https://semver.org/)
   with a `DeprecationWarning`; they will be removed in a future release.
 
 ### Removed
+- `fluxprint/ext_libs/`: a byte-identical duplicate of the vendored Kljun
+  reference, a committed binary wheel and two stale notebooks - none of it
+  reachable from the package.
 - The `Kormann_and_Meixner_2001` module: it was untranslated scaffolding that
   raised `NameError` on any call. The model remains planned; the reference
   math will be ported against the paper in a future release.

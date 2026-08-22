@@ -433,13 +433,21 @@ def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
 def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
     """
     Aggregate multiple footprints into a single climatological footprint.
-    
+
+    .. deprecated:: 0.3
+        Use :meth:`FootprintSeries.aggregate` instead; this raw-array helper
+        will be removed in a future release.
+
     Parameters:
         footprints (list): List of footprint dictionaries.
-    
+
     Returns:
         np.ndarray: Aggregated footprint.
     """
+    warnings.warn(
+        "fluxprint.aggregate_footprints is deprecated and will be removed in "
+        "a future release; use FootprintSeries.aggregate() instead.",
+        DeprecationWarning, stacklevel=2)
     fclim_2d = np.array(fclim_2d)
     if len(fclim_2d.shape) == 2:
         logger.info(
@@ -461,6 +469,22 @@ def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
 
 
 def get_contour(footprint, dx, dy, rs, verbosity=0):
+    """Source-area contours of a legacy footprint object.
+
+    .. deprecated:: 0.3
+        Use :meth:`Footprint.contours` instead; this helper will be removed
+        in a future release. A :class:`Footprint` argument is delegated there.
+    """
+    warnings.warn(
+        "fluxprint.get_contour is deprecated and will be removed in a future "
+        "release; use Footprint.contours() instead.",
+        DeprecationWarning, stacklevel=2)
+    if isinstance(footprint, Footprint):
+        return footprint.contours(rs if rs is not None else (0.5, 0.8))
+    if rs is None:
+        raise ValueError(
+            "rs is required for the legacy get_contour path (e.g. "
+            "rs=[0.5, 0.8]).")
     flag_err = 0
 
     footprint = utils.convert_to_object(

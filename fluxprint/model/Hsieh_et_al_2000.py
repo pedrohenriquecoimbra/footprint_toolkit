@@ -1,3 +1,15 @@
+"""Hsieh et al. (2000) footprint model -- EXPERIMENTAL, WORK IN PROGRESS.
+
+This draft port is deliberately NOT registered as a fluxprint model: its
+climatology rotation is known to be wrong (see the inline note below), its
+output is a per-pixel fraction rather than the m**-2 density the Footprint
+contract requires, and it has no input validation or tests. Do not use it for
+science yet; it ships only as a starting point for completing the port.
+
+Reference: Hsieh, C.-I., G. Katul, T. Chi (2000): An approximate analytical
+model for footprint estimation of scalar fluxes in thermally stratified
+atmospheric flows. Adv. Water Resour. 23, 765-772.
+"""
 import numpy as np
 from scipy.stats import norm
 from scipy.special import gamma

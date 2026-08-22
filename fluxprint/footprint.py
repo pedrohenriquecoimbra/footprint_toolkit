@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterator
@@ -54,6 +55,59 @@ def _is_regular(coord: np.ndarray, *, rtol: float = 1e-3) -> bool:
         return True
     steps = np.diff(coord)
     return bool(np.allclose(steps, steps[0], rtol=rtol))
+
+
+def _ring_signed_area(ring: np.ndarray) -> float:
+    """Shoelace signed area of a closed ring (positive = counter-clockwise)."""
+    x, y = ring[:, 0], ring[:, 1]
+    return float(np.sum(x[:-1] * y[1:] - x[1:] * y[:-1]) / 2.0)
+
+
+def _point_in_ring(point: np.ndarray, ring: np.ndarray) -> bool:
+    """Ray-casting point-in-polygon test against a closed ring."""
+    x, y = float(point[0]), float(point[1])
+    vx, vy = ring[:-1, 0], ring[:-1, 1]
+    wx, wy = ring[1:, 0], ring[1:, 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        crossing = ((vy > y) != (wy > y)) & (
+            x < (wx - vx) * (y - vy) / (wy - vy) + vx)
+    return bool(np.count_nonzero(crossing) % 2)
+
+
+def _nest_rings(segments: list[np.ndarray]) -> list[list[list[tuple]]]:
+    """Group closed rings into GeoJSON-style polygons ``[exterior, holes...]``.
+
+    Containment depth decides the role: even depth = the exterior of a
+    polygon, odd depth = a hole of its smallest enclosing exterior. Annular
+    level sets (e.g. climatologies over opposing wind sectors) produce holes;
+    writing every ring as a solid polygon would double-count them. Exteriors
+    are oriented counter-clockwise, holes clockwise.
+    """
+    rings = []
+    for seg in segments:
+        ring = np.asarray(seg, dtype=float)
+        if not np.array_equal(ring[0], ring[-1]):
+            ring = np.vstack([ring, ring[:1]])
+        rings.append(ring)
+    n = len(rings)
+    contains = [[j != i and _point_in_ring(rings[i][0], rings[j])
+                 for j in range(n)] for i in range(n)]
+    depth = [sum(row) for row in contains]
+    areas = [abs(_ring_signed_area(ring)) for ring in rings]
+
+    def _as_coords(ring: np.ndarray, *, clockwise: bool) -> list[tuple]:
+        if (_ring_signed_area(ring) < 0) != clockwise:
+            ring = ring[::-1]
+        return [(float(px), float(py)) for px, py in ring]
+
+    polygons = {i: [_as_coords(rings[i], clockwise=False)]
+                for i in range(n) if depth[i] % 2 == 0}
+    for i in range(n):
+        if depth[i] % 2 == 1:
+            parent = min((j for j in polygons if contains[i][j]),
+                         key=lambda j: areas[j])
+            polygons[parent].append(_as_coords(rings[i], clockwise=True))
+    return list(polygons.values())
 
 
 def _is_relative_label(time: Any) -> bool:
@@ -196,6 +250,154 @@ class Footprint:
                 "Cannot normalize a footprint whose integral is zero (empty "
                 "field, or a degenerate single-row/column grid).")
         return self._replace(f=self.f / scale)
+
+    def contours(self, rs: Any = (0.5, 0.8)) -> list[dict]:
+        """Source-area isopleths: the contour enclosing ``r`` of the flux.
+
+        For each requested fraction ``r``, finds the field level whose
+        enclosed integral is nearest to ``r`` (the full model footprint
+        integrates to one, so on a truncated domain the highest reachable
+        fraction is :meth:`total`), then extracts the contour polylines at
+        that level. Requires ``contourpy`` (installed with matplotlib).
+
+        Args:
+            rs: Source-area fraction(s) in ``(0, 0.9]`` — a scalar or a
+                sequence; values above 1 are read as percentages (``80`` ->
+                ``0.8``).
+
+        Returns:
+            One dict per fraction, ascending: ``{"r", "level", "fraction",
+            "vertices", "closed"}``. ``vertices`` is a list of ``(N, 2)``
+            x/y polyline arrays (a level may have several), ``fraction`` is
+            the integral actually enclosed at ``level``, and ``closed`` is
+            False when any polyline touches the domain edge (the isopleth is
+            incomplete — enlarge the domain). A fraction above :meth:`total`
+            is unreachable: it warns and yields ``level=nan`` with no
+            vertices.
+        """
+        if isinstance(rs, (int, float)):
+            rs = [rs]
+        rs = [float(r) / 100.0 if r > 1 else float(r) for r in rs]
+        if any(not 0.0 < r <= 0.9 for r in rs):
+            raise ValueError(
+                f"Source-area fractions must be in (0, 0.9], got {rs}; the "
+                "parameterisations are not defined beyond the 90% contour.")
+        rs = sorted(rs)
+
+        cell = self.dx * self.dy
+        if cell == 0:
+            raise ValueError("Cannot contour a degenerate (zero cell area) grid.")
+        sf = np.sort(self.f, axis=None)[::-1]
+        sf = sf[np.isfinite(sf)]
+        csf = np.cumsum(sf) * cell
+        captured = float(csf[-1]) if csf.size else 0.0
+
+        out = []
+        for r in rs:
+            if captured <= 0 or r > captured:
+                warnings.warn(
+                    f"The {r:.0%} source area is unreachable: the domain "
+                    f"captures only {captured:.0%} of the flux. Enlarge "
+                    "`domain` to close this contour.", UserWarning,
+                    stacklevel=2)
+                out.append({"r": r, "level": float("nan"), "fraction": 0.0,
+                            "vertices": [], "closed": False})
+                continue
+            idx = int(np.argmin(np.abs(csf - r)))
+            level = float(sf[idx])
+            vertices = self._contour_vertices(level)
+            # contourpy duplicates the closing vertex of a closed loop
+            # exactly, so test exact equality: a relative tolerance would
+            # scale with the coordinate origin and mark open, edge-clipped
+            # contours "closed" on georeferenced (~1e6 m) grids.
+            closed = bool(vertices) and all(
+                len(seg) > 2 and np.array_equal(seg[0], seg[-1])
+                for seg in vertices)
+            out.append({"r": r, "level": level, "fraction": float(csf[idx]),
+                        "vertices": vertices, "closed": closed})
+        return out
+
+    def _contour_vertices(self, level: float) -> list[np.ndarray]:
+        """Polylines of the field at ``level`` as ``(N, 2)`` x/y arrays."""
+        try:
+            from contourpy import LineType, contour_generator
+        except ImportError as exc:  # pragma: no cover - env dependent
+            raise ImportError(
+                "'contourpy' is required for contour extraction; it is "
+                "installed together with matplotlib.") from exc
+        gen = contour_generator(x=self.x, y=self.y, z=self.f,
+                                line_type=LineType.Separate)
+        return [np.asarray(seg, dtype=float) for seg in gen.lines(float(level))]
+
+    def plot(self, ax: Any = None, *, rs: Any = None, cmap: str = "viridis",
+             colorbar: bool | None = None, **kwargs: Any) -> Any:
+        """Plot the footprint field, optionally with source-area isopleths.
+
+        Requires ``matplotlib``. Never calls ``plt.show()`` — display (or
+        save) the returned axes' figure yourself.
+
+        Args:
+            ax: Existing matplotlib axes to draw into (a new figure otherwise).
+            rs: Source-area fraction(s) to overlay as contour lines
+                (see :meth:`contours`).
+            cmap: Colormap name for the field.
+            colorbar: Attach a colorbar. Default (``None``): only when a new
+                figure is created; pass ``True``/``False`` to force either
+                way on any axes.
+            **kwargs: Forwarded to ``pcolormesh``.
+
+        Returns:
+            The matplotlib axes containing the plot.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:  # pragma: no cover - env dependent
+            raise ImportError(
+                "'matplotlib' is required for Footprint.plot().") from exc
+        created_figure = ax is None
+        if created_figure:
+            _, ax = plt.subplots()
+        mesh = ax.pcolormesh(self.x, self.y, self.f, shading="auto",
+                             cmap=cmap, **kwargs)
+        if colorbar or (colorbar is None and created_figure):
+            ax.figure.colorbar(mesh, ax=ax, label="footprint [m$^{-2}$]")
+        if rs is not None:
+            for contour in self.contours(rs):
+                for seg in contour["vertices"]:
+                    ax.plot(seg[:, 0], seg[:, 1], color="white",
+                            linewidth=1.0)
+        tower = self._tower_in_grid_crs()
+        if tower is not None:
+            ax.plot(*tower, marker="^", color="black", markersize=6,
+                    linestyle="none")
+        ax.set_xlabel("x [m]")
+        ax.set_ylabel("y [m]")
+        ax.set_aspect("equal")
+        return ax
+
+    def _tower_in_grid_crs(self) -> tuple[float, float] | None:
+        """Tower position expressed in the grid's frame, or None if unknown.
+
+        ``self.tower`` is stored in ``tower_crs``, which on a georeferenced
+        footprint generally differs from the grid's ``crs`` — plotting it raw
+        would place the marker in the wrong spot (or off the map entirely).
+        """
+        if not self.is_georeferenced:
+            return (0.0, 0.0)  # the local frame is tower-centred
+        if self.tower is None:
+            return None
+        if self.tower_crs is None or str(self.tower_crs) == str(self.crs):
+            return (float(self.tower[0]), float(self.tower[1]))
+        try:
+            from pyproj import Transformer
+            transformer = Transformer.from_crs(self.tower_crs, self.crs,
+                                               always_xy=True)
+            tx, ty = transformer.transform(self.tower[0], self.tower[1])
+            return (float(tx), float(ty))
+        except Exception:  # pyproj missing or CRS unparseable
+            logger.debug("Could not transform tower %r from %r to %r.",
+                         self.tower, self.tower_crs, self.crs)
+            return None
 
     # -- construction ------------------------------------------------------ #
     @classmethod
@@ -367,6 +569,56 @@ class Footprint:
             y = north - dy / 2 - np.arange(src.height) * dy
             crs = str(src.crs) if src.crs is not None else None
         return cls(f=band, x=x, y=np.sort(y), crs=crs)
+
+    # -- Shapefile (optional: fiona) --------------------------------------- #
+    def to_shapefile(self, path: str, rs: Any = (0.5, 0.8),
+                     **kwargs: Any) -> None:
+        """Write source-area isopleths to an ESRI Shapefile. Requires ``fiona``.
+
+        Each closed contour from :meth:`contours` becomes one polygon record
+        with properties ``r`` (source-area fraction) and ``level`` (field
+        value). Contours that touch the domain edge are skipped with a
+        warning — enlarge the model domain to close them. When the footprint
+        is georeferenced the CRS is written alongside.
+
+        Args:
+            path: Destination ``.shp`` path.
+            rs: Source-area fraction(s) to export (see :meth:`contours`).
+            **kwargs: Forwarded to ``fiona.open``.
+        """
+        fiona = _require("fiona", "shapefile")
+        open_kwargs: dict[str, Any] = {
+            "driver": "ESRI Shapefile",
+            "schema": {"geometry": "Polygon",
+                       "properties": {"r": "float", "level": "float"}},
+        }
+        if self.crs is not None:
+            try:
+                from pyproj import CRS
+                open_kwargs["crs_wkt"] = CRS.from_user_input(self.crs).to_wkt()
+            except Exception:  # pyproj missing or crs unparseable
+                logger.debug("Could not expand crs %r for the shapefile.",
+                             self.crs)
+        open_kwargs.update(kwargs)
+
+        contours = self.contours(rs)
+        with fiona.open(str(path), "w", **open_kwargs) as dst:
+            for contour in sorted(contours, key=lambda c: c["r"],
+                                  reverse=True):
+                if not contour["closed"]:
+                    if contour["vertices"]:  # unreachable ones warned already
+                        warnings.warn(
+                            f"Skipping the open {contour['r']:.0%} contour "
+                            "(it touches the domain edge).", UserWarning,
+                            stacklevel=2)
+                    continue
+                for rings in _nest_rings(contour["vertices"]):
+                    dst.write({
+                        "geometry": {"type": "Polygon",
+                                     "coordinates": rings},
+                        "properties": {"r": float(contour["r"]),
+                                       "level": float(contour["level"])},
+                    })
 
     # -- internals --------------------------------------------------------- #
     @staticmethod

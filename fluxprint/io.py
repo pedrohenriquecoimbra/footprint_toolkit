@@ -1,11 +1,12 @@
 import re
 import glob
+import logging
+import warnings
 import rasterio
 import xarray as xr
 import requests
 import pandas as pd
 import numpy as np
-import logging
 import os
 from io import BytesIO
 from zipfile import ZipFile
@@ -13,8 +14,16 @@ from pyproj import Transformer
 from shapely import geometry
 import fiona
 from . import utils
+from .footprint import Footprint, FootprintSeries
 
 logger = logging.getLogger('fluxprint.io')
+
+
+def _warn_legacy_writer(name, replacement, stacklevel=3):
+    warnings.warn(
+        f"fluxprint.{name} is deprecated and will be removed in a future "
+        f"release; use {replacement}() instead.",
+        DeprecationWarning, stacklevel=stacklevel)
 
 def is_glob_path(path):
     # Regular expression to check for glob characters
@@ -127,27 +136,47 @@ def write_to_file(data, path, **kwargs):
         None
     """
     if isinstance(path, str):
+        # Warn as write_to_file (what the user actually called), and tell the
+        # dispatched writer not to warn again about itself.
+        _warn_legacy_writer(
+            "write_to_file", "Footprint.to_netcdf/to_tiff/to_shapefile")
         if path.endswith('.nc'):
-            return write_to_netcdf(data, path, **kwargs)
+            return write_to_netcdf(data, path, _warn=False, **kwargs)
         elif path.endswith('.shp'):
-            return write_to_shapefile(data, path, **kwargs)
+            return write_to_shapefile(data, path, _warn=False, **kwargs)
         elif path.endswith('.tif'):
-            return write_to_raster(data, path, **kwargs)
+            return write_to_raster(data, path, _warn=False, **kwargs)
         else:
             raise ValueError(f"Unsupported file format: {path}")
     return
 
-def write_to_netcdf(data, path, **kwargs):
+def write_to_netcdf(data, path, _warn=True, **kwargs):
+    if _warn:
+        _warn_legacy_writer("write_to_netcdf", "Footprint.to_netcdf")
+    # The package's own objects know how to write themselves.
+    if isinstance(data, (Footprint, FootprintSeries)):
+        return data.to_netcdf(path, **kwargs)
     # Convert data to NetCDF format if necessary
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
         data = utils.convert_to_nc(data, **kwargs)
     # Write the data to the file
     return data.to_netcdf(path, 'w')
 
-def write_to_shapefile(data, path, **kwargs):
-    from .core import get_contour
+def write_to_shapefile(data, path, _warn=True, **kwargs):
+    if _warn:
+        _warn_legacy_writer("write_to_shapefile", "Footprint.to_shapefile")
+    if isinstance(data, FootprintSeries):
+        raise TypeError(
+            "write_to_shapefile needs a single footprint; aggregate() the "
+            "series (or index it) first.")
+    if isinstance(data, Footprint):
+        return data.to_shapefile(path, **kwargs)
     if not isinstance(data, dict):
-        data = utils.convert_to_dict(data)
+        raise TypeError(
+            "write_to_shapefile accepts a Footprint or the legacy "
+            "{label: footprint} mapping of contoured footprints; got "
+            f"{type(data).__name__}.")
+    from .core import get_contour
     # Write a new Shapefile
     for d, footprint in data.items():
         if 'rs' not in footprint.keys():
@@ -158,7 +187,15 @@ def write_to_shapefile(data, path, **kwargs):
         __write_to_shp__(dst_path, footprint, **kwargs)
     return
 
-def write_to_raster(data, path, **kwargs):
+def write_to_raster(data, path, _warn=True, **kwargs):
+    if _warn:
+        _warn_legacy_writer("write_to_raster", "Footprint.to_tiff")
+    if isinstance(data, FootprintSeries):
+        raise TypeError(
+            "write_to_raster needs a single footprint; aggregate() the "
+            "series (or index it) first.")
+    if isinstance(data, Footprint):
+        return data.to_tiff(path, **kwargs)
     # Convert data to a raster if necessary
     if not isinstance(data, (rasterio.io.DatasetWriter, rasterio.io.DatasetReader)):
         data = utils.convert_to_tif(data, **kwargs)

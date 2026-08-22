@@ -1,29 +1,20 @@
 # built-in modules
 import warnings
-import copy
 import re
 import numbers
-import sys
-import os
 import logging
 from datetime import datetime
 
 # 3rd party modules
 import numpy as np
-from numpy import ma
 import pandas as pd
 from scipy import signal as sg
-from pyproj import Transformer
-import xarray as xr
-import rasterio
-import matplotlib.pyplot as plt
 
-# local modules
+# local modules (deliberately light: the geo/plotting stack loads lazily via
+# `utils`/`io` function-level imports, so `import fluxprint` stays cheap)
 from .footprint import Footprint, FootprintSeries
 from .model import get_model
-from . import utils
 from . import io
-from . import template
 from . import exceptions
 from . import micrometeorology
 
@@ -462,7 +453,9 @@ def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
 
     # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
     if smooth_data:
-        skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
+        skernel = np.array([[0.05, 0.1, 0.05],
+                            [0.10, 0.4, 0.10],
+                            [0.05, 0.1, 0.05]])
         fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
         fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
     return fclim_clim
@@ -485,6 +478,7 @@ def get_contour(footprint, dx, dy, rs, verbosity=0):
         raise ValueError(
             "rs is required for the legacy get_contour path (e.g. "
             "rs=[0.5, 0.8]).")
+    from . import utils  # deferred: pulls the heavy geo/plotting stack
     flag_err = 0
 
     footprint = utils.convert_to_object(

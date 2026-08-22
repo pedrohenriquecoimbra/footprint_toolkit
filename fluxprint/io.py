@@ -2,18 +2,13 @@ import re
 import glob
 import logging
 import warnings
-import rasterio
-import xarray as xr
 import requests
 import pandas as pd
-import numpy as np
-import os
 from io import BytesIO
 from zipfile import ZipFile
-from pyproj import Transformer
-from shapely import geometry
-import fiona
-from . import utils
+# The heavy geo stack (rasterio, xarray, fiona, shapely) and requests are
+# imported inside the functions that need them, so `import fluxprint` stays
+# light and the optional-extras split remains possible.
 from .footprint import Footprint, FootprintSeries
 
 logger = logging.getLogger('fluxprint.io')
@@ -79,6 +74,7 @@ def read_from_url(url=None, *args, **kwargs):
         in_memory.seek(0)
 
     try:
+        import xarray as xr
         return xr.open_dataset(in_memory)
     except Exception as exc:
         errors.append(f"netcdf: {exc}")
@@ -104,10 +100,12 @@ def read_from_file(path, *args, memory=True, **kwargs):
         if path.endswith('.csv'):
             return pd.read_csv(path, *args, **kwargs)
         elif path.endswith('.nc'):
+            import xarray as xr
             kwargs_ = {'engine': "netcdf4"}
             kwargs_.update(kwargs)
             return xr.open_dataset(path, *args, **kwargs_)
         elif path.endswith('.tif'):
+            import rasterio
             if memory:
                 with rasterio.open(path) as tif:
                     memory_tif = rasterio.io.MemoryFile().open(**tif.meta)
@@ -118,7 +116,7 @@ def read_from_file(path, *args, memory=True, **kwargs):
                 return rasterio.open(path, *args, **kwargs)
         else:
             raise ValueError(f"Unsupported file format: {path}")
-    elif isinstance(path, (xr.core.dataset.Dataset)):
+    elif type(path).__module__.split('.')[0] == 'xarray':
         return path
     return
 
@@ -156,8 +154,10 @@ def write_to_netcdf(data, path, _warn=True, **kwargs):
     # The package's own objects know how to write themselves.
     if isinstance(data, (Footprint, FootprintSeries)):
         return data.to_netcdf(path, **kwargs)
+    import xarray as xr
     # Convert data to NetCDF format if necessary
     if not isinstance(data, (xr.Dataset, xr.DataArray)):
+        from . import utils
         data = utils.convert_to_nc(data, **kwargs)
     # Write the data to the file
     return data.to_netcdf(path, 'w')
@@ -196,8 +196,10 @@ def write_to_raster(data, path, _warn=True, **kwargs):
             "series (or index it) first.")
     if isinstance(data, Footprint):
         return data.to_tiff(path, **kwargs)
+    import rasterio
     # Convert data to a raster if necessary
     if not isinstance(data, (rasterio.io.DatasetWriter, rasterio.io.DatasetReader)):
+        from . import utils
         data = utils.convert_to_tif(data, **kwargs)
     # Write the data to the file
     with rasterio.open(path, "w", **data.meta) as dest:
@@ -206,6 +208,8 @@ def write_to_raster(data, path, _warn=True, **kwargs):
 
 
 def __write_to_shp__(dst_path, footprint, schema: dict={}, **kwargs):
+    import fiona
+    from shapely import geometry
     # Define a polygon feature geometry with one attribute
     schema.update({
         'geometry': 'Polygon',

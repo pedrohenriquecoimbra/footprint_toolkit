@@ -17,10 +17,55 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package and test dependencies
-        # netcdf4 is required by the .nc read/write paths but not yet declared
-        # as a dependency (planned for the extras split).
         run: |
           python -m pip install --upgrade pip
-          pip install -e . pytest netcdf4
+          pip install -e .[dev]
+      - name: Import stays light (no geo/plotting stack at import time)
+        run: >
+          python -c "import fluxprint, sys;
+          loaded = [m for m in ('rasterio', 'fiona', 'shapely', 'xarray',
+          'pyproj', 'matplotlib') if m in sys.modules];
+          assert not loaded, f'import fluxprint eagerly loaded {loaded}'"
       - name: Run test suite
         run: python -m pytest tests/ -q
+
+  # Every registered footprint model must reproduce its original (vendored)
+  # implementation EXACTLY - run as its own named check so a divergence is
+  # visible at a glance, not buried in the matrix.
+  reference-equivalence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Models match their reference implementations exactly
+        run: python -m pytest tests/test_reference_regression.py -v
+
+  # Mirror to the INRAE Forge only after the tests and the model-equivalence
+  # check pass, so the mirror never receives a broken or diverged state.
+  mirror:
+    if: github.event_name == 'push'
+    needs: [test, reference-equivalence]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.INRAE_FORGE_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan forge.inrae.fr >> ~/.ssh/known_hosts
+
+      - name: Push to INRAE Forge
+        run: |
+          git remote add inrae ${{ secrets.INRAE_FORGE_REPO }}
+          git push inrae --all  # Push all local branches
+          git push inrae --tags # Push all tags

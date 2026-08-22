@@ -12,24 +12,30 @@ authors = [
 ]
 keywords = ["footprint", "flux", "eddy covariance", "EC", "micrometeorology"]
 license = "EUPL-1.2"
+license-files = [
+    "LICENSE",
+    # The vendored Kljun et al. (2015) reference code's ISC-style license
+    # requires its permission notice to accompany all copies.
+    "fluxprint/model/Kljun_et_al_2015_original/license.txt",
+]
 requires-python = ">=3.10"
-# Runtime requirements. These are all imported eagerly today (core/io/utils
-# import rasterio/xarray/pyproj/fiona/shapely at module load), so they cannot be
-# made optional until those imports are deferred. The `Footprint` object itself
-# is numpy-only and imports its IO backends lazily; the optional-extras split
-# below becomes meaningful once the eager imports in core/io/utils are removed.
+# Runtime requirements. `import fluxprint` itself is light (the geo/plotting
+# stack loads lazily inside the functions that need it); the heavy libraries
+# remain hard dependencies for 0.3 so existing installs keep working, and are
+# planned to move into the extras below in a future release.
 dependencies = [
     "numpy",
     "scipy",
     "pandas",
     "matplotlib",
     "xarray",
+    "netcdf4",
     "rasterio",
     "pyproj",
     "shapely",
     "fiona",
     "requests",
-    "regorator",
+    "regorator>=0.2,<0.3",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -47,13 +53,18 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# The names below are what the package's ImportError hints advertise. Their
+# packages are (still) also in `dependencies`; a future release will drop them
+# there so a minimal install becomes possible - the extras are declared now so
+# `pip install fluxprint[netcdf]` is valid today.
+netcdf = ["xarray", "netcdf4"]
+tiff = ["rasterio"]
+crs = ["pyproj"]
+shapefile = ["fiona", "shapely"]
+viz = ["folium"]
+all = ["xarray", "netcdf4", "rasterio", "pyproj", "fiona", "shapely", "folium"]
+dev = ["pytest"]
 icoscp = ["icoscp", "icoscp_core"]
-# Planned, once core/io/utils defer their imports (the `Footprint` object is
-# already lazy): split the heavy libraries out of `dependencies` into:
-#   netcdf    = ["xarray", "netcdf4"]
-#   tiff      = ["rasterio"]
-#   crs       = ["pyproj"]
-#   shapefile = ["fiona", "shapely"]
 
 [project.urls]
 Homepage = "https://github.com/pedrohenriquecoimbra/fluxprint"
@@ -61,7 +72,14 @@ Issues = "https://github.com/pedrohenriquecoimbra/fluxprint/issues"
 
 [tool.setuptools]
 # `version` is read statically from the literal in fluxprint/version.py
-packages.find = { where = ["."], include = ["fluxprint*"], exclude = ["sample*", "tests*", "deprecated*"], namespaces = false }
+packages.find = { where = ["."], include = ["fluxprint*"], exclude = ["sample*", "tests*"], namespaces = false }
+
+[tool.setuptools.package-data]
+# Ship the vendored reference code's license notice inside the package too.
+"fluxprint.model.Kljun_et_al_2015_original" = ["license.txt"]
 
 [tool.setuptools.dynamic]
 version = { attr = "fluxprint.version.version" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

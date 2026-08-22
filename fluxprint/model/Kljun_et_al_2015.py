@@ -2,16 +2,13 @@
 
 """
 
-import sys
 import numbers
 import logging
-import matplotlib
 import numpy as np
 from scipy import signal as sg
 
 
 from ..exceptions import *
-from ..utils import plot_footprint, get_contour_levels, get_contour_vertices
 from ..footprint import Footprint
 from .base import register_model
 
@@ -340,13 +337,18 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
         # Truthiness, not `is not None`: smooth_data=0 must actually disable
         # smoothing as documented (it used to smooth anyway).
         if smooth_data:
-            skernel  = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
+            # np.matrix is pending removal from numpy; same kernel values.
+            skernel  = np.array([[0.05, 0.1, 0.05],
+                                 [0.10, 0.4, 0.10],
+                                 [0.05, 0.1, 0.05]])
             fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
             fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
 
         #===========================================================================
         # Crop domain and footprint to the largest rs value
         if crop:
+            # Deferred: utils pulls the heavy geo/plotting stack at import.
+            from ..utils import get_contour_levels, get_contour_vertices
             rs_dummy = 0.8  # crop to 80%
             clevs = get_contour_levels(fclim_2d, dx, dy, rs_dummy)
             xrs = []

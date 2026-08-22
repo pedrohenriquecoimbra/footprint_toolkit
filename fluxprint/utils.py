@@ -4,7 +4,6 @@ import logging
 import copy
 
 # 3rd party modules
-from rasterio.transform import Affine
 import numpy as np
 from numpy import ma
 import xarray as xr

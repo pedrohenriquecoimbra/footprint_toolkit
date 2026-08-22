@@ -570,7 +570,20 @@ def calc_footprint_1d(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v
             }
 
 
-@register_model("kljun2015", description="Kljun et al. (2015) FFP parameterisation")
+#: Provenance stamped into every footprint this model produces.
+MODEL_META = {
+    "model_citation": ("Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid "
+                       "(2015): The simple two-dimensional parameterisation "
+                       "for Flux Footprint Prediction (FFP). Geosci. Model "
+                       "Dev. 8, 3695-3713."),
+    "model_doi": "10.5194/gmd-8-3695-2015",
+    "model_reference_version": "FFP 1.42",
+}
+
+
+@register_model("kljun2015",
+                description="Kljun et al. (2015) FFP parameterisation",
+                **MODEL_META)
 def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
          domain=None, dx=None, dy=None, nx=None, ny=None, rslayer=0,
          smooth_data=1, tower=None, tower_crs=None, time=None, verbosity=0,
@@ -617,12 +630,28 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         wind_dir=_listify(wind_dir), domain=domain, dx=dx, dy=dy, nx=nx, ny=ny,
         rslayer=rslayer, smooth_data=smooth_data, crop=0, verbosity=verbosity)
 
+    from datetime import datetime as _dt, timezone as _tz
+    from ..version import __version__ as _fluxprint_version
+
     x = np.asarray(out.x_2d)[0, :]
     y = np.asarray(out.y_2d)[:, 0]
+    # Provenance: enough metadata to trace a stored footprint back to the
+    # code, model and settings that produced it.
+    attrs = {
+        "model": "kljun2015",
+        "flag_err": int(out.flag_err),
+        **MODEL_META,
+        "fluxprint_version": _fluxprint_version,
+        "wind_profile_input": "umean" if z0 is None else "z0",
+        "rslayer": int(rslayer),
+        "smooth_data": int(bool(smooth_data)),
+        "history": (f"{_dt.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
+                    f"created by fluxprint {_fluxprint_version}, "
+                    "model kljun2015"),
+    }
     fp = Footprint(
         f=np.asarray(out.fclim_2d), x=x, y=y, time=time,
-        tower=tower, tower_crs=tower_crs, n=int(out.n),
-        attrs={"model": "kljun2015", "flag_err": int(out.flag_err)})
+        tower=tower, tower_crs=tower_crs, n=int(out.n), attrs=attrs)
     if fp.n:
         # The grid integral of the full footprint is 1 by construction, so the
         # captured fraction diagnoses how much flux the domain truncates. It is

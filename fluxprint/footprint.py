@@ -27,7 +27,7 @@ import importlib
 import logging
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
@@ -185,6 +185,17 @@ class Footprint:
             raise ValueError(
                 "a georeferenced footprint (crs set) cannot carry a relative "
                 "time label; use a timestamp (datetime) or None.")
+        if isinstance(self.time, datetime) and self.time.tzinfo is not None:
+            # Times are stored naive: serialization has no timezone
+            # representation, so a tz-aware stamp would be coerced silently
+            # later. Convert explicitly (to UTC) and say so. Flux networks
+            # conventionally use *local standard time* - document which
+            # convention your timestamps follow.
+            warnings.warn(
+                "tz-aware timestamp converted to naive UTC "
+                f"({self.time.isoformat()}); fluxprint stores times as naive "
+                "timestamps.", UserWarning, stacklevel=3)
+            self.time = self.time.astimezone(timezone.utc).replace(tzinfo=None)
 
     # -- geometry ---------------------------------------------------------- #
     @property
@@ -480,7 +491,11 @@ class Footprint:
 
     # -- NetCDF (optional: xarray / netcdf4) ------------------------------- #
     def to_xarray(self) -> "xr.Dataset":
-        """Convert to a CF-style :class:`xarray.Dataset`. Requires ``xarray``."""
+        """Convert to a CF-style :class:`xarray.Dataset`. Requires ``xarray``.
+
+        Georeferenced footprints carry a CF ``grid_mapping`` variable
+        (``spatial_ref``) so GDAL/QGIS/rioxarray recognize the CRS.
+        """
         xr = _require("xarray", "netcdf")
         ds = xr.Dataset(
             {"footprint": (("y", "x"), self.f,
@@ -491,7 +506,11 @@ class Footprint:
             },
         )
         ds = ds.assign_coords(**_time_coord(self.time))
+        if self.is_georeferenced:
+            ds["spatial_ref"] = _grid_mapping_var(xr, self.crs)
+            ds["footprint"].attrs["grid_mapping"] = "spatial_ref"
         ds.attrs.update(self._serializable_attrs())
+        ds.attrs.setdefault("Conventions", "CF-1.8")
         return ds
 
     @classmethod
@@ -679,7 +698,8 @@ class Footprint:
 # --------------------------------------------------------------------------- #
 # Shared NetCDF attribute helpers                                             #
 # --------------------------------------------------------------------------- #
-_RESERVED_ATTRS = {"crs", "tower_x", "tower_y", "tower_crs", "n_records"}
+_RESERVED_ATTRS = {"crs", "tower_x", "tower_y", "tower_crs", "n_records",
+                   "Conventions"}
 
 
 def _pack_footprint(ds: "xr.Dataset", decimals: int, dtype: str = "int32") -> "xr.Dataset":
@@ -700,9 +720,32 @@ def _pack_footprint(ds: "xr.Dataset", decimals: int, dtype: str = "int32") -> "x
 
 
 def _coord_attrs(axis: str, georeferenced: bool) -> dict[str, str]:
-    name = {"x": "projection_x_coordinate", "y": "projection_y_coordinate"}[axis]
-    return {"standard_name": name, "units": "m",
-            "long_name": f"{axis} ({'projected' if georeferenced else 'from tower'})"}
+    attrs = {"units": "m", "axis": axis.upper(),
+             "long_name": f"{axis} ({'projected' if georeferenced else 'from tower'})"}
+    if georeferenced:
+        # The CF projection_* standard names are only true of a projected CRS;
+        # local tower-relative metres must not claim them.
+        attrs["standard_name"] = {
+            "x": "projection_x_coordinate", "y": "projection_y_coordinate",
+        }[axis]
+    return attrs
+
+
+def _grid_mapping_var(xr_mod: Any, crs: str) -> "xr.DataArray":
+    """Scalar CF grid-mapping variable carrying the CRS (rioxarray-style)."""
+    try:
+        from pyproj import CRS
+        _crs = CRS.from_user_input(crs)
+        wkt = _crs.to_wkt()
+        attrs = {"crs_wkt": wkt, "spatial_ref": wkt}
+        try:
+            attrs.update({k: v for k, v in _crs.to_cf().items()
+                          if v is not None})
+        except Exception:  # to_cf can fail for exotic CRSes; wkt suffices
+            pass
+    except Exception:  # pyproj missing or crs unparseable -> keep the string
+        attrs = {"crs_wkt": str(crs)}
+    return xr_mod.DataArray(0, attrs=attrs)
 
 
 def _time_coord(time: datetime | float | None) -> dict[str, Any]:
@@ -710,7 +753,10 @@ def _time_coord(time: datetime | float | None) -> dict[str, Any]:
         return {}
     if isinstance(time, datetime):
         return {"time": np.datetime64(time)}
-    return {"time": time}  # numeric (relative) label
+    import xarray as xr  # only reached from to_xarray, so xarray is present
+    return {"time": xr.DataArray(
+        time, attrs={"units": "1",
+                     "long_name": "relative time label (arbitrary origin)"})}
 
 
 def _read_time(coord: "xr.DataArray") -> datetime | float:
@@ -873,7 +919,13 @@ class FootprintSeries:
 
     # -- NetCDF (optional: xarray / netcdf4) ------------------------------- #
     def to_xarray(self) -> "xr.Dataset":
-        """Convert to a ``(time, y, x)`` :class:`xarray.Dataset`. Requires ``xarray``."""
+        """Convert to a ``(time, y, x)`` :class:`xarray.Dataset`. Requires ``xarray``.
+
+        Only grid-level metadata survives: global attrs are taken from the
+        first member, so attrs that differ per member (e.g. ``group``,
+        ``captured_fraction``) are not round-tripped. Per-step ``n`` is kept
+        as the ``n_records`` variable.
+        """
         xr = _require("xarray", "netcdf")
         ref = self.footprints[0]
         data = {"footprint": (("time", "y", "x"), self.stack(),
@@ -889,8 +941,12 @@ class FootprintSeries:
                 "y": ("y", ref.y, _coord_attrs("y", self.is_georeferenced)),
             },
         )
+        if self.is_georeferenced:
+            ds["spatial_ref"] = _grid_mapping_var(xr, ref.crs)
+            ds["footprint"].attrs["grid_mapping"] = "spatial_ref"
         ds.attrs.update({k: v for k, v in ref._serializable_attrs().items()
                          if k != "n_records"})
+        ds.attrs.setdefault("Conventions", "CF-1.8")
         return ds
 
     @classmethod

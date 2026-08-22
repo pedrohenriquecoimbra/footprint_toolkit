@@ -120,9 +120,32 @@ def compute_ustar(umean, zm, z0=0.1, k=0.4):
     return (np.asarray(umean) * k) / np.log(np.asarray(zm) / z0)
 
 
+@register("displacement", ESTIMATORS, "Displacement height from canopy height")
+def compute_displacement(canopy_height, c=0.67):
+    """Zero-plane displacement ``d ~ c * canopy_height`` (rule of thumb).
+
+    The models' ``zm`` is the *aerodynamic* measurement height ``z - d``, not
+    the instrument height; over vegetation the difference is substantial.
+    """
+    return c * np.asarray(canopy_height)
+
+
+def _zm_from_heights(d):
+    """zm = measurement height - displacement (from d or canopy height)."""
+    displacement = d.get("displacement")
+    if displacement is None:
+        if d.get("canopy_height") is None:
+            return None
+        displacement = compute_displacement(d["canopy_height"])
+    return np.asarray(d["measurement_height"]) - np.asarray(displacement)
+
+
 def _essential() -> dict[str, tuple]:
     # variable -> (constant value | callable(data), required input keys)
     return {
+        # zm from measurement height minus displacement (z - d): the models
+        # need the aerodynamic height, which flux metadata rarely lists.
+        "zm": (_zm_from_heights, ("measurement_height",)),
         # z0 requires a real Obukhov length: a defaulted ol here (formerly
         # ol=1 m, extreme stability) made psi_f huge and z0 astronomically
         # wrong. Estimation order in core computes mo_length before z0.
@@ -162,25 +185,30 @@ def filler(data: Mapping[str, Any], variable: str, fill_all: bool = True):
     Returns:
         The estimated value, or ``None`` when unavailable/disabled.
     """
-    table = {**_filler(), **_essential()} if fill_all else _essential()
-    entry = table.get(variable)
-    if entry is None:
-        return None
+    tables = [(_essential(), False)]
+    if fill_all:
+        tables.append((_filler(), True))
 
-    spec, needs = entry
-    # Present-but-None counts as unavailable (callers commonly pass None for
-    # absent variables); dereferencing it would crash the estimator.
-    if any(data.get(key) is None for key in needs):
-        logger.debug("Cannot estimate %r: missing inputs %s.",
-                     variable, [k for k in needs if data.get(k) is None])
-        return None
-
-    if callable(spec):
-        return spec(data)
-    message = f"Using crude fallback for missing {variable!r}: {spec}"
-    logger.warning("%s", message)
-    warnings.warn(message, UserWarning, stacklevel=2)
-    return spec
+    for table, crude in tables:
+        entry = table.get(variable)
+        if entry is None:
+            continue
+        spec, needs = entry
+        # Present-but-None counts as unavailable (callers commonly pass None
+        # for absent variables); dereferencing it would crash the estimator.
+        if any(data.get(key) is None for key in needs):
+            logger.debug("Cannot estimate %r: missing inputs %s.",
+                         variable, [k for k in needs if data.get(k) is None])
+            continue
+        value = spec(data) if callable(spec) else spec
+        if value is None:  # estimator declined (e.g. optional inputs absent)
+            continue
+        if crude and not callable(spec):
+            message = f"Using crude fallback for missing {variable!r}: {spec}"
+            logger.warning("%s", message)
+            warnings.warn(message, UserWarning, stacklevel=2)
+        return value
+    return None
 
 
 def caller(data: Mapping[str, Any], variable: str):

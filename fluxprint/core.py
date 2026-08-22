@@ -115,9 +115,18 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # models. 'H' (sensible heat flux, W m-2) is matched case-sensitively
         # so a lowercase 'h' column (FFP's name for the boundary-layer height)
         # is never mistaken for it. TA is degC, PA is kPa.
-        for key, aliases, exact in (('H', ['H', 'H_F'], True),
-                                    ('TA', ['TA', 'TA_F'], False),
-                                    ('PA', ['PA', 'PA_F'], False)):
+        for key, aliases, exact in (
+                ('H', ['H', 'H_F'], True),
+                ('TA', ['TA', 'TA_F'], False),
+                ('PA', ['PA', 'PA_F'], False),
+                # Height metadata for zm = z - d (aerodynamic height).
+                ('measurement_height',
+                 ['measurement_height', 'sensor_height', 'instrument_height'],
+                 False),
+                ('canopy_height',
+                 ['canopy_height', 'vegetation_height', 'hc'], False),
+                ('displacement',
+                 ['displacement', 'displacement_height', 'zd'], False)):
             # An explicit None kwarg means "not available": fall through to
             # the column scan instead of feeding None to the estimators.
             if kwargs.get(key) is not None:

@@ -513,52 +513,25 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         A local-frame :class:`~fluxprint.footprint.Footprint` (``n`` = records
         composited; ``attrs["flag_err"]`` carries the model error flag).
     """
-    def _listify(value):
-        # calc_ffp_climatology wraps non-lists as a single element, so arrays /
-        # tuples / Series must be converted to a list; scalars pass through.
-        if value is None or isinstance(value, (int, float, list)):
-            return value
-        return list(value)
+    # The generic pipeline: normalize -> grid -> loop -> Footprint. Only
+    # _kljun_record (and the constants inside it) is Kljun physics.
+    rslayer = 0 if rslayer is None else rslayer
+    smooth_data = 1 if smooth_data is None else smooth_data
 
-    out = calc_ffp_climatology(
-        zm=_listify(zm), z0=_listify(z0), umean=_listify(umean),
-        ustar=_listify(ustar), pblh=_listify(pblh),
-        mo_length=_listify(mo_length), v_sigma=_listify(v_sigma),
-        wind_dir=_listify(wind_dir), domain=domain, dx=dx, dy=dy, nx=nx, ny=ny,
-        rslayer=rslayer, smooth_data=smooth_data, crop=0, verbosity=verbosity)
-
-    from datetime import datetime as _dt, timezone as _tz
-    from ..version import __version__ as _fluxprint_version
-
-    x = np.asarray(out.x_2d)[0, :]
-    y = np.asarray(out.y_2d)[:, 0]
-    # Provenance: enough metadata to trace a stored footprint back to the
-    # code, model and settings that produced it.
-    attrs = {
-        "model": "kljun2015",
-        "flag_err": int(out.flag_err),
-        **MODEL_META,
-        "fluxprint_version": _fluxprint_version,
-        "wind_profile_input": "umean" if z0 is None else "z0",
-        "rslayer": int(rslayer),
-        "smooth_data": int(bool(smooth_data)),
-        "history": (f"{_dt.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                    f"created by fluxprint {_fluxprint_version}, "
-                    "model kljun2015"),
-    }
-    fp = Footprint(
-        f=np.asarray(out.fclim_2d), x=x, y=y, time=time,
-        tower=tower, tower_crs=tower_crs, n=int(out.n), attrs=attrs)
-    if fp.n:
-        # The grid integral of the full footprint is 1 by construction, so the
-        # captured fraction diagnoses how much flux the domain truncates. It is
-        # computed on the returned field, so with smooth_data=1 it also
-        # includes the ~1% border mass the smoothing kernel loses.
-        captured = fp.total()
-        fp.attrs["captured_fraction"] = float(captured)
-        if captured < 0.8:
-            logger.warning(
-                "Footprint domain captures only %.0f%% of the flux; source-"
-                "area fractions above that are unreachable. Enlarge `domain` "
-                "(or reduce `dx`) to capture more.", captured * 100)
-    return fp
+    inputs = engine.normalize_inputs(
+        zm=engine.listify(zm), ustar=engine.listify(ustar),
+        pblh=engine.listify(pblh), mo_length=engine.listify(mo_length),
+        v_sigma=engine.listify(v_sigma), wind_dir=engine.listify(wind_dir),
+        z0=engine.listify(z0), umean=engine.listify(umean),
+        verbosity=verbosity)
+    spec = resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny)
+    result = engine.run_climatology(
+        _kljun_record, ctx=GridContext(spec), inputs=inputs,
+        opts={"rslayer": rslayer}, validate=engine.ffp_validate,
+        smooth_data=smooth_data, verbosity=verbosity)
+    return engine.build_footprint(
+        result, name="kljun2015", meta=MODEL_META,
+        wind_profile_input="umean" if z0 is None else "z0",
+        settings={"rslayer": int(rslayer),
+                  "smooth_data": int(bool(smooth_data))},
+        tower=tower, tower_crs=tower_crs, time=time, log=logger)

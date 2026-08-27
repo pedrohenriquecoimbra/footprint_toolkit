@@ -22,12 +22,13 @@ from typing import Any, Callable, NamedTuple
 import numpy as np
 
 from ..exceptions import check_ffp_inputs, raise_ffp_exception
-from ..footprint import smooth_field
+from ..footprint import Footprint, smooth_field
 
 logger = logging.getLogger('fluxprint.model.engine')
 
 __all__ = ["NormalizedInputs", "MetRecord", "ClimResult", "listify",
-           "normalize_inputs", "ffp_validate", "run_climatology"]
+           "normalize_inputs", "ffp_validate", "run_climatology",
+           "build_footprint"]
 
 
 class NormalizedInputs(NamedTuple):
@@ -234,3 +235,61 @@ def run_climatology(kernel: Callable, *, ctx, inputs: NormalizedInputs,
 
     return ClimResult(fclim_2d=fclim_2d, x=ctx.x, y=ctx.y, n=n,
                       flag_err=flag_err)
+
+
+def build_footprint(result: ClimResult, *, name: str,
+                    meta: dict | None = None, wind_profile_input: str,
+                    settings: dict | None = None, tower=None, tower_crs=None,
+                    time=None, log: logging.Logger | None = None) -> Footprint:
+    """Wrap a raw climatology into a provenance-stamped :class:`Footprint`.
+
+    The adapter tail every model used to copy: provenance attrs (model name,
+    error flag, the model's citation ``meta``, fluxprint version, settings,
+    a ``history`` line) plus the ``captured_fraction`` diagnostic with its
+    under-capture warning (emitted on ``log`` so it stays attributed to the
+    producing model's logger).
+
+    Args:
+        result: :func:`run_climatology` output.
+        name: Registered model name (stamped into ``attrs["model"]``).
+        meta: The model's provenance dict (citation/DOI/reference version).
+        wind_profile_input: ``"z0"`` or ``"umean"`` — which profile input
+            drove the calculation.
+        settings: Model settings worth recording (e.g. ``rslayer``,
+            ``smooth_data``), inserted before the ``history`` line.
+        tower, tower_crs, time: Metadata attached to the footprint.
+        log: Logger for the truncation warning; defaults to the engine's.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    from ..version import __version__ as _fluxprint_version
+
+    log = logger if log is None else log
+    attrs = {
+        "model": name,
+        "flag_err": int(result.flag_err),
+        **(meta or {}),
+        "fluxprint_version": _fluxprint_version,
+        "wind_profile_input": wind_profile_input,
+        **(settings or {}),
+        "history": (f"{_dt.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
+                    f"created by fluxprint {_fluxprint_version}, "
+                    f"model {name}"),
+    }
+    fp = Footprint(
+        f=np.asarray(result.fclim_2d), x=np.asarray(result.x),
+        y=np.asarray(result.y), time=time,
+        tower=tower, tower_crs=tower_crs, n=int(result.n), attrs=attrs)
+    if fp.n:
+        # The grid integral of the full footprint is 1 by construction, so the
+        # captured fraction diagnoses how much flux the domain truncates. It is
+        # computed on the returned field, so with smoothing on it also
+        # includes the ~1% border mass the smoothing kernel loses.
+        captured = fp.total()
+        fp.attrs["captured_fraction"] = float(captured)
+        if captured < 0.8:
+            log.warning(
+                "Footprint domain captures only %.0f%% of the flux; source-"
+                "area fractions above that are unreachable. Enlarge `domain` "
+                "(or reduce `dx`) to capture more.", captured * 100)
+    return fp

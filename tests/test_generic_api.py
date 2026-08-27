@@ -126,6 +126,57 @@ def test_captured_fraction_is_live_total():
 
 
 # --------------------------------------------------------------------------- #
+# Footprint.weighted_mean                                                     #
+# --------------------------------------------------------------------------- #
+def test_weighted_mean_uniform_field_is_exactly_one():
+    # The bug this method exists to prevent: a uniform field of 1.0 must come
+    # back as 1.0 whatever the normalization or domain truncation.
+    fp = _gaussian(nx=41, ny=41, dx=10.0, sigma=120.0)  # truncated domain
+    assert fp.weighted_mean(np.ones_like(fp.f)) == 1.0
+    assert fp.normalized().weighted_mean(np.ones_like(fp.f)) == 1.0
+
+
+def test_weighted_mean_weights_by_the_footprint():
+    fp = _gaussian(nx=41, ny=41, dx=10.0, sigma=40.0)
+    # A field that is 2 where the footprint peaks and 0 far away.
+    field = np.where(np.abs(fp.meshgrid()[0]) < 50, 2.0, 0.0)
+    mean = fp.weighted_mean(field)
+    assert 1.0 < mean < 2.0  # dominated by, but not equal to, the peak value
+
+
+def test_weighted_mean_ignores_nan_field_cells():
+    fp = _gaussian()
+    field = np.ones_like(fp.f)
+    field[:5, :] = np.nan
+    assert fp.weighted_mean(field) == 1.0
+
+
+def test_weighted_mean_min_coverage_gate():
+    fp = _gaussian(nx=201, ny=201, dx=5.0, sigma=100.0)
+    field = np.ones_like(fp.f)
+    assert fp.weighted_mean(field, min_coverage=0.9) == 1.0
+    # Blank out most of the field: coverage collapses below the gate.
+    field[fp.f > np.nanpercentile(fp.f, 5)] = np.nan
+    with pytest.warns(UserWarning, match="min_coverage"):
+        assert np.isnan(fp.weighted_mean(field, min_coverage=0.9))
+    # Percent spelling of the gate behaves identically.
+    with pytest.warns(UserWarning, match="min_coverage"):
+        assert np.isnan(fp.weighted_mean(field, min_coverage=90))
+
+
+def test_weighted_mean_shape_mismatch_raises():
+    fp = _gaussian()
+    with pytest.raises(ValueError, match="shape"):
+        fp.weighted_mean(np.ones((3, 3)))
+
+
+def test_weighted_mean_no_overlap_warns_nan():
+    fp = _gaussian()
+    with pytest.warns(UserWarning, match="no footprint weight"):
+        assert np.isnan(fp.weighted_mean(np.full_like(fp.f, np.nan)))
+
+
+# --------------------------------------------------------------------------- #
 # ALIASES                                                                     #
 # --------------------------------------------------------------------------- #
 def test_aliases_exported_at_top_level():

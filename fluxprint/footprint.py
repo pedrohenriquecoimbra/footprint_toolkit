@@ -367,6 +367,55 @@ class Footprint:
             return float("nan")
         return float(sf[int(np.argmin(np.abs(csf - r)))])
 
+    def weighted_mean(self, field: np.ndarray, *,
+                      min_coverage: float | None = None) -> float:
+        """Footprint-weighted mean of a gridded quantity.
+
+        ``sum(f * field) / sum(f)`` over the cells where both the footprint
+        and ``field`` are finite — a true weighted mean, so a uniform field
+        comes back unchanged regardless of domain truncation or the
+        footprint's normalization (the renormalization integrators tend to
+        forget). NaN cells in ``field`` are excluded from both sums.
+
+        Args:
+            field: 2-D array on this footprint's grid (same shape as ``f``),
+                e.g. a land-cover fraction or remote-sensing raster band.
+            min_coverage: Minimum fraction of the *full* (unit-integral)
+                model footprint that must fall on finite ``field`` cells —
+                this combines domain truncation and NaN holes (values above
+                1 are read as percentages). Below it, warn and return
+                ``nan`` instead of a mean quietly dominated by whatever
+                data remains.
+
+        Returns:
+            The weighted mean, or ``nan`` (with a warning) when no weight
+            overlaps valid data or coverage is below ``min_coverage``.
+        """
+        field = np.asarray(field, dtype=float)
+        if field.shape != self.f.shape:
+            raise ValueError(
+                f"field has shape {field.shape} but the footprint grid is "
+                f"{self.f.shape}; resample the field onto the footprint "
+                "grid first.")
+        valid = np.isfinite(self.f) & np.isfinite(field)
+        wsum = float(self.f[valid].sum()) if valid.any() else 0.0
+        if wsum <= 0:
+            warnings.warn(
+                "weighted_mean: no footprint weight overlaps finite field "
+                "cells; returning nan.", UserWarning, stacklevel=2)
+            return float("nan")
+        if min_coverage is not None:
+            mc = (float(min_coverage) / 100.0 if min_coverage > 1
+                  else float(min_coverage))
+            coverage = wsum * self.dx * self.dy
+            if coverage < mc:
+                warnings.warn(
+                    f"weighted_mean: only {coverage:.0%} of the footprint "
+                    f"falls on finite field cells (min_coverage={mc:.0%}); "
+                    "returning nan.", UserWarning, stacklevel=2)
+                return float("nan")
+        return float((self.f[valid] * field[valid]).sum() / wsum)
+
     def contours(self, rs: Any = (0.5, 0.8)) -> list[dict]:
         """Source-area isopleths: the contour enclosing ``r`` of the flux.
 

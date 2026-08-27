@@ -11,7 +11,7 @@ import pandas as pd
 
 # local modules (deliberately light: the geo/plotting stack loads lazily via
 # `utils`/`io` function-level imports, so `import fluxprint` stays cheap)
-from .footprint import Footprint, FootprintSeries, smooth_field
+from .footprint import Footprint, FootprintSeries
 from .model import get_model
 from . import io
 from . import exceptions
@@ -489,48 +489,14 @@ def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
     return result
 
 
-def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
-    """
-    Aggregate multiple footprints into a single climatological footprint.
-
-    .. deprecated:: 0.3
-        Use :meth:`FootprintSeries.aggregate` instead; this raw-array helper
-        will be removed in a future release.
-
-    Parameters:
-        footprints (list): List of footprint dictionaries.
-
-    Returns:
-        np.ndarray: Aggregated footprint.
-    """
-    warnings.warn(
-        "fluxprint.aggregate_footprints is deprecated and will be removed in "
-        "a future release; use FootprintSeries.aggregate() instead.",
-        DeprecationWarning, stacklevel=2)
-    fclim_2d = np.array(fclim_2d)
-    if len(fclim_2d.shape) == 2:
-        logger.info(
-            f"Footprint must be 3D (time, x, y), dimension passed was: {fclim_2d.shape}.")
-        return fclim_2d
-
-    assert len(
-        fclim_2d.shape) == 3, f"Footprint must be 3D (time, x, y), dimension passed was: {fclim_2d.shape}."
-    #n_valid = len(fclim_2d)
-
-    fclim_clim = np.nanmean(fclim_2d, axis=0)
-
-    # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
-    if smooth_data:
-        fclim_clim = smooth_field(fclim_clim)
-    return fclim_clim
-
-
 def get_contour(footprint, dx, dy, rs, verbosity=0):
     """Source-area contours of a legacy footprint object.
 
     .. deprecated:: 0.3
-        Use :meth:`Footprint.contours` instead; this helper will be removed
-        in a future release. A :class:`Footprint` argument is delegated there.
+        Use :meth:`Footprint.contours` instead. Removal is deferred to the
+        release that also removes the legacy ``io.write_*`` writers
+        (``write_to_shapefile``'s legacy-dict branch still calls this).
+        A :class:`Footprint` argument is delegated to ``contours()``.
     """
     warnings.warn(
         "fluxprint.get_contour is deprecated and will be removed in a future "
@@ -548,47 +514,42 @@ def get_contour(footprint, dx, dy, rs, verbosity=0):
     footprint = utils.convert_to_object(
         footprint)
 
-    # Handle rs
-    if rs is not None:
+    # Handle rs (guaranteed non-None here: the None case raised above)
+    # Check that rs is a list, otherwise make it a list
+    if isinstance(rs, numbers.Number):
+        if 0.9 < rs <= 1 or 90 < rs <= 100:
+            rs = 0.9
+        rs = [rs]
+    if not isinstance(rs, list):
+        exceptions.raise_ffp_exception(18, verbosity)
 
-        # Check that rs is a list, otherwise make it a list
-        if isinstance(rs, numbers.Number):
-            if 0.9 < rs <= 1 or 90 < rs <= 100:
-                rs = 0.9
-            rs = [rs]
-        if not isinstance(rs, list):
-            exceptions.raise_ffp_exception(18, verbosity)
+    # If rs is passed as percentages, normalize to fractions of one
+    if np.max(rs) >= 1:
+        rs = [x/100. for x in rs]
 
-        # If rs is passed as percentages, normalize to fractions of one
-        if np.max(rs) >= 1:
-            rs = [x/100. for x in rs]
+    # Eliminate any values beyond 0.9 (90%) and inform user
+    if np.max(rs) > 0.9:
+        exceptions.raise_ffp_exception(19, verbosity)
+        rs = [item for item in rs if item <= 0.9]
 
-        # Eliminate any values beyond 0.9 (90%) and inform user
-        if np.max(rs) > 0.9:
-            exceptions.raise_ffp_exception(19, verbosity)
-            rs = [item for item in rs if item <= 0.9]
+    # Sort levels in ascending order
+    rs = list(np.sort(rs))
 
-        # Sort levels in ascending order
-        rs = list(np.sort(rs))
+    # Derive footprint ellipsoid incorporating R% of the flux, starting at
+    # peak value.
+    clevs = utils.get_contour_levels(footprint.fclim_2d, dx, dy, rs)
+    frs = [item[2] for item in clevs]
+    xrs = []
+    yrs = []
+    for ix, fr in enumerate(frs):
+        xr, yr = utils.get_contour_vertices(
+            footprint.x_2d, footprint.y_2d, footprint.fclim_2d, fr)
+        if xr is None:
+            frs[ix] = None
+            flag_err = 2
+        xrs.append(xr)
+        yrs.append(yr)
 
-    # Derive footprint ellipsoid incorporating R% of the flux, if requested,
-    # starting at peak value.
-    if rs is not None:
-        clevs = utils.get_contour_levels(footprint.fclim_2d, dx, dy, rs)
-        frs = [item[2] for item in clevs]
-        xrs = []
-        yrs = []
-        for ix, fr in enumerate(frs):
-            xr, yr = utils.get_contour_vertices(
-                footprint.x_2d, footprint.y_2d, footprint.fclim_2d, fr)
-            if xr is None:
-                frs[ix] = None
-                flag_err = 2
-            xrs.append(xr)
-            yrs.append(yr)
-
-    # footprint.update({"xr": xrs, "yr": yrs, 'fr': frs, 'rs': rs})
-    # return footprint
     return type('var_', (object,), {"xr": xrs, "yr": yrs, 'fr': frs, 'rs': rs, 'flag_err': flag_err})
 
 
@@ -597,7 +558,6 @@ __all__ = [
     "calculate_footprint",
     "empty_footprint",
     "process_footprint_inputs",
-    "aggregate_footprints",
     "get_contour",
     "wrapper",
 ]

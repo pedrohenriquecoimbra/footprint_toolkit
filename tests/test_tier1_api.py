@@ -203,11 +203,10 @@ def test_get_contour_deprecated_but_delegates_for_footprints():
     assert out[0]["r"] == 0.5
 
 
-def test_aggregate_footprints_deprecated_and_honours_smooth_data_zero():
-    with pytest.warns(DeprecationWarning, match="aggregate"):
-        out = core.aggregate_footprints(np.ones((2, 4, 4)), 10.0, 10.0,
-                                        smooth_data=0)
-    assert np.allclose(out, 1.0)             # smooth_data=0 must not smooth
+def test_aggregate_footprints_removed():
+    # Deprecated in 0.3.0, removed in 0.4.0 (one full cycle served).
+    assert not hasattr(core, "aggregate_footprints")
+    assert "aggregate_footprints" not in core.__all__
 
 
 def test_legacy_write_netcdf_accepts_footprint(tmp_path):

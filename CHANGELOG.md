@@ -85,6 +85,10 @@ step (CI-enforced).
 - The unreachable `crop` block in `calc_ffp_climatology` (never reachable
   through the package API). Passing `crop`/`rs` now emits a
   `DeprecationWarning` pointing at `Footprint.contours()`/`level_for()`.
+- `fluxprint.aggregate_footprints` (deprecated in 0.3.0; one full cycle
+  served): use `FootprintSeries.aggregate()`. The removal of the also-
+  deprecated `get_contour` is deferred to the release that removes the
+  legacy `io.write_*` writers, whose shapefile writer still calls it.
 - Dead code: an unreachable duplicate block in `utils.convert_to_object`, the
   broken `utils.find_utm_epsg_from_lon_deprecated`, the unused
   `commons.ensure_supported_dtype` machinery, the unused

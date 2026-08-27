@@ -187,7 +187,11 @@ their original implementation — CI enforces this.
 - `calculate_footprint(data, by=None, model="kljun2015", ...)` — footprint each
   group of a table; returns a `FootprintSeries`.
 - `wrapper(...)` — `calculate_footprint` + aggregation + optional file output.
-- `empty_footprint(model, domain=..., dx=...)` — a NaN template on the model's grid.
+- `empty_footprint(model, domain=..., dx=...)` — a NaN template on the model's
+  grid. This is the template API: use it to learn the exact output grid/shape
+  (~2 ms) instead of running the model on placeholder meteorology.
+- `ALIASES` — the table of column aliases `process_footprint_inputs` recognizes
+  (model inputs and estimator drivers).
 - `read_handler` / `read_from_url` / `read_from_file` — table/NetCDF/TIFF readers.
 - Legacy `write_to_*` helpers are deprecated: use the `Footprint.to_*` methods.
 
@@ -201,6 +205,11 @@ their original implementation — CI enforces this.
 - `Footprint.from_grid(f, dx, dy=None, **meta)` — build a local, tower-centred footprint.
 - `georeference(target_crs)` / `to_lonlat()` — local → projected; display lon/lat.
 - `total()`, `peak_xy()`, `normalized()`, `contours(rs)` — analysis helpers.
+- `captured_fraction` — fraction of the flux the domain captures (= `total()`).
+- `level_for(r)` — the source-area field level for fraction `r` (fractions are
+  of the full unit-integral footprint, not of the captured total).
+- `smoothed()` — the standard FFP 3×3 double-convolution smoothing, applicable
+  to any footprint (`fluxprint.footprint.smooth_field` is the array primitive).
 - `plot(rs=None)` — matplotlib quick look (never calls `plt.show()`).
 - `to_netcdf` / `from_netcdf`, `to_tiff` / `from_tiff`, `to_xarray` /
   `from_xarray`, `to_shapefile`.

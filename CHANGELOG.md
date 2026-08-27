@@ -7,6 +7,35 @@ and the project aims to follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+Additive generic-layer API (the 0.3.1 fast-follow); no model files touched.
+
+### Added
+- `fluxprint.footprint.smooth_field()` and `FFP_SMOOTH_KERNEL`: the standard
+  FFP 3x3 double-convolution smoothing as a model-agnostic primitive, and
+  `Footprint.smoothed()` to apply it to any footprint.
+  `FootprintSeries.aggregate` and the deprecated `aggregate_footprints` now
+  share this single implementation.
+- `Footprint.level_for(r)`: the source-area field level for a fraction `r`,
+  without contour extraction; `Footprint.contours()` uses the same search.
+  Fractions are of the full (unit-integral) model footprint, not of the
+  captured total - the two differ on any truncated domain.
+- `Footprint.captured_fraction`: live property (equal to `total()`), the
+  generic counterpart of the model-stamped `attrs["captured_fraction"]`.
+- `fluxprint.ALIASES`: the exported table of column aliases recognized by
+  `process_footprint_inputs` (model inputs and estimator drivers), so
+  downstream integrations no longer maintain their own copy.
+
+### Changed
+- `process_footprint_inputs(data=...)` now raises a `TypeError` naming the
+  supported containers when `data` is neither a DataFrame nor a dict (e.g. an
+  `xarray.Dataset`); previously such input was silently ignored and the
+  computation proceeded from kwargs alone.
+
+### Deprecated
+- `fluxprint.utils.smooth_data()`: use `fluxprint.footprint.smooth_field()`.
+
+## [0.3.0] - unreleased
+
 ### Added
 - Provenance on every model output: `attrs` now carry the fluxprint version,
   the model's citation/DOI/reference version, the wind-profile input mode,

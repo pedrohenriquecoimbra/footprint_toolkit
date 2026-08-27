@@ -337,9 +337,15 @@ def footprint_model(name: str, *, description: str = "",
     def decorator(kernel: Callable):
         def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir,
                  z0=None, umean=None, domain=None, dx=None, dy=None,
-                 nx=None, ny=None, smooth_data=1, tower=None, tower_crs=None,
-                 time=None, verbosity=0, **kwargs) -> Footprint:
-            smooth_data = 1 if smooth_data is None else smooth_data
+                 nx=None, ny=None, smooth=None, smooth_data=None, tower=None,
+                 tower_crs=None, time=None, verbosity=0,
+                 **kwargs) -> Footprint:
+            # `smooth` is the generic spelling, `smooth_data` the
+            # FFP-compatible one; `smooth` wins when both are given.
+            if smooth is not None:
+                smooth_data = smooth
+            elif smooth_data is None:
+                smooth_data = 1
             opts = dict(option_defaults)
             for key in options:
                 if kwargs.get(key) is not None:

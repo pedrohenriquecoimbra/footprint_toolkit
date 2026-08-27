@@ -183,3 +183,34 @@ def test_toy_model_flows_through_calculate_footprint(toy_model):
     assert len(series) == 1
     assert series[0].n == 4
     assert series[0].attrs["model"] == "toy_gauss"
+
+
+# --------------------------------------------------------------------------- #
+# smooth / smooth_data: one knob, two spellings                               #
+# --------------------------------------------------------------------------- #
+def test_smooth_spellings_are_equivalent_on_kljun():
+    kljun = get_model("kljun2015")
+    via_generic = kljun(**MET, **GRID, smooth=0, verbosity=0)
+    via_ffp = kljun(**MET, **GRID, smooth_data=0, verbosity=0)
+    assert np.array_equal(via_generic.f, via_ffp.f)
+    assert via_generic.attrs["smooth_data"] == 0
+
+
+def test_smooth_wins_over_smooth_data(toy_model):
+    both = toy_model(**MET, **GRID, smooth=0, smooth_data=1, verbosity=0)
+    off = toy_model(**MET, **GRID, smooth_data=0, verbosity=0)
+    assert np.array_equal(both.f, off.f)
+
+
+# --------------------------------------------------------------------------- #
+# calc_ffp_climatology: deprecated crop/rs kwargs                             #
+# --------------------------------------------------------------------------- #
+def test_shim_warns_on_deprecated_crop_and_rs():
+    from fluxprint.model.Kljun_et_al_2015 import calc_ffp_climatology
+
+    met = {k: [v] for k, v in MET.items()}
+    with pytest.warns(DeprecationWarning, match="crop"):
+        out = calc_ffp_climatology(**met, **GRID, crop=1, verbosity=0)
+    assert out.n == 1  # crop is ignored, the field is still computed
+    with pytest.warns(DeprecationWarning, match="rs"):
+        calc_ffp_climatology(**met, **GRID, rs=[0.8], verbosity=0)

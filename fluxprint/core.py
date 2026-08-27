@@ -265,9 +265,13 @@ def _group_label(key):
 
 
 #: Inputs forwarded to a model's ``calc`` (met. variables + grid options).
+#: ``smooth`` and ``smooth_data`` are two spellings of one knob (``smooth``
+#: is generic and wins; ``smooth_data`` is FFP-compatible and pinned by
+#: downstream integrations).
 _MODEL_KEYS = frozenset({
     "zm", "z0", "umean", "ustar", "pblh", "mo_length", "v_sigma", "wind_dir",
-    "domain", "dx", "dy", "nx", "ny", "rslayer", "smooth_data", "verbosity",
+    "domain", "dx", "dy", "nx", "ny", "rslayer", "smooth", "smooth_data",
+    "verbosity",
 })
 
 

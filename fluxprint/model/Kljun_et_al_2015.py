@@ -3,6 +3,8 @@
 """
 
 import logging
+import warnings
+
 import numpy as np
 
 
@@ -108,8 +110,8 @@ def _kljun_record(ctx, rec, opts):
 
 
 def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v_sigma=None, ustar=None,
-                    wind_dir=None, domain=None, dx=None, dy=None, nx=None, ny=None, 
-                    rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], rslayer=0,
+                    wind_dir=None, domain=None, dx=None, dy=None, nx=None, ny=None,
+                    rs=None, rslayer=0,
                     smooth_data=1, crop=False, pulse=None, verbosity=2, **kwargs):
     """
     Derive a flux footprint estimate based on the simple parameterisation FFP
@@ -152,16 +154,15 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
                        Large nx/ny result in higher spatial resolution and higher computing time
                        Default is nx = ny = 1000. If only nx is given, nx=ny.
                        If both dx/dy and nx/ny are given, dx/dy is given priority if the domain is also specified.
-        rs           = Percentage of source area for which to provide contours, must be between 10% and 90%. 
-                       Can be either a single value (e.g., "80") or a list of values (e.g., "[10, 20, 30]")
-                       Expressed either in percentages ("80") or as fractions of 1 ("0.8"). 
-                       Default is [10:10:80]. Set to "None" for no output of percentages
+        rs           = DEPRECATED, ignored: source areas moved to
+                       Footprint.contours() / Footprint.level_for().
         rslayer      = Calculate footprint even if zm within roughness sublayer: set rslayer = 1
-                       Note that this only gives a rough estimate of the footprint as the model is not 
+                       Note that this only gives a rough estimate of the footprint as the model is not
                        valid within the roughness sublayer. Default is 0 (i.e. no footprint for within RS).
                        z0 is needed for estimation of the RS.
         smooth_data  = Apply convolution filter to smooth footprint climatology if smooth_data=1 (default)
-        crop         = Crop output area to size of the 80% footprint or the largest r given if crop=1
+        crop         = DEPRECATED, ignored: crop via Footprint.contours() and
+                       slicing instead.
         pulse        = Display progress of footprint calculations every pulse-th footprint (e.g., "100")
         verbosity    = Level of verbosity at run time: 0 = completely silent, 1 = notify only of fatal errors,
                        2 = all notifications
@@ -171,12 +172,8 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
         x_2d	    = x-grid of 2-dimensional footprint [m]
         y_2d	    = y-grid of 2-dimensional footprint [m]
         fclim_2d = Normalised footprint function values of footprint climatology [m-2]
-        rs       = Percentage of footprint as in input, if provided
-        fr       = Footprint value at r, if r is provided
-        xr       = x-array for contour line of r, if r is provided
-        yr       = y-array for contour line of r, if r is provided
         n        = Number of footprints calculated and included in footprint climatology
-        flag_err = 0 if no error, 1 in case of error, 2 if not all contour plots (rs%) within specified domain,
+        flag_err = 0 if no error, 1 in case of error,
                    3 if single data points had to be removed (outside validity)
 
     Created: 19 May 2016 natascha kljun
@@ -186,25 +183,22 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     Copyright (C) 2015 - 2023 Natascha Kljun
     """
 
+    if crop:
+        warnings.warn(
+            "calc_ffp_climatology(crop=...) is deprecated and ignored; crop "
+            "via Footprint.contours()/level_for() and array slicing instead.",
+            DeprecationWarning, stacklevel=2)
+    if rs is not None:
+        warnings.warn(
+            "calc_ffp_climatology(rs=...) is deprecated and has never had an "
+            "effect in this port; source areas moved to Footprint.contours().",
+            DeprecationWarning, stacklevel=2)
+
     #===========================================================================
     # Input check (hoisted verbatim into fluxprint.model.engine)
-    flag_err = 0
     inputs = engine.normalize_inputs(
         zm=zm, ustar=ustar, pblh=pblh, mo_length=mo_length, v_sigma=v_sigma,
         wind_dir=wind_dir, z0=z0, umean=umean, verbosity=verbosity)
-
-    # Rename lists as now the function expects time series of inputs
-    ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans = (
-        inputs.ustar, inputs.v_sigma, inputs.pblh, inputs.mo_length,
-        inputs.wind_dir, inputs.zm, inputs.z0, inputs.umean)
-    ts_len = inputs.ts_len
-
-    #===========================================================================
-    # Define computational domain: the reference's reconciliation rules moved
-    # verbatim into the model-agnostic fluxprint.grid.resolve_grid.
-    spec = resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny)
-    xmin, xmax, ymin, ymax = spec.domain
-    dx, dy = spec.dx, spec.dy
 
     # Define rslayer if not passed
     if rslayer is None: rslayer = 0
@@ -212,78 +206,21 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     # Define smooth_data if not passed
     if smooth_data is None: smooth_data = 1
 
-    # Define crop if not passed
-    if crop is None: crop = 0
-
-    # Define pulse if not passed
-    if pulse == None:
-        if ts_len <= 20:
-            pulse = 1
-        else:
-            pulse = int(ts_len / 20)
-
     #===========================================================================
-    # Physical domain (fluxprint.grid); the per-record physics is
-    # _kljun_record, driven by the model-agnostic engine loop below.
-    ctx = GridContext(spec)
-    x_2d, y_2d = ctx.x_2d, ctx.y_2d
-
-    #===========================================================================
-    # Loop on time series, accumulation, normalization and smoothing: hoisted
-    # verbatim into engine.run_climatology.
+    # Computational domain (fluxprint.grid: the reference's reconciliation
+    # rules, verbatim); the per-record physics is _kljun_record, driven by
+    # the model-agnostic engine loop.
+    ctx = GridContext(resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny))
     result = engine.run_climatology(
         _kljun_record, ctx=ctx, inputs=inputs, opts={"rslayer": rslayer},
         validate=engine.ffp_validate, smooth_data=smooth_data, pulse=pulse,
         verbosity=verbosity)
-    fclim_2d = result.fclim_2d
-    n = result.n
-    flag_err = result.flag_err
 
-    clevs = None
-    if n:
-        #===========================================================================
-        # Crop domain and footprint to the largest rs value
-        if crop:
-            # Deferred: utils pulls the heavy geo/plotting stack at import.
-            from ..utils import get_contour_levels, get_contour_vertices
-            rs_dummy = 0.8  # crop to 80%
-            clevs = get_contour_levels(fclim_2d, dx, dy, rs_dummy)
-            xrs = []
-            yrs = []
-            xrs, yrs = get_contour_vertices(x_2d, y_2d, fclim_2d, clevs[0][2])
-
-            xrs_crop = [x for x in xrs if x is not None]
-            yrs_crop = [x for x in yrs if x is not None]
-
-            dminx = np.floor(min(xrs_crop[-1]))
-            dmaxx = np.ceil(max(xrs_crop[-1]))
-            dminy = np.floor(min(yrs_crop[-1]))
-            dmaxy = np.ceil(max(yrs_crop[-1]))
-                
-            if dminy>=ymin and dmaxy<=ymax:
-                jrange = np.where((y_2d[:,0] >= dminy) & (y_2d[:,0] <= dmaxy))[0]
-                jrange = np.concatenate(([jrange[0]-1], jrange, [jrange[-1]+1]))
-                jrange = jrange[np.where((jrange>=0) & (jrange<=y_2d.shape[0]))[0]]
-            else:
-                jrange = np.linspace(0, 1, y_2d.shape[0]-1)
-                        
-            if dminx>=xmin and dmaxx<=xmax:
-                irange = np.where((x_2d[0,:] >= dminx) & (x_2d[0,:] <= dmaxx))[0]
-                irange = np.concatenate(([irange[0]-1], irange, [irange[-1]+1]))
-                irange = irange[np.where((irange>=0) & (irange<=x_2d.shape[1]))[0]]
-            else:
-                irange = np.linspace(0, 1, x_2d.shape[1]-1)
-
-            jrange = [[it] for it in jrange]
-            x_2d = x_2d[jrange,irange]
-            y_2d = y_2d[jrange,irange]
-            fclim_2d = fclim_2d[jrange,irange]
-
-            
     #===========================================================================
     # Fill output structure
-    return type('var_', (object,), {'x_2d': x_2d, 'y_2d': y_2d, 'fclim_2d': fclim_2d,
-                'n': n, 'flag_err': flag_err})
+    return type('var_', (object,), {'x_2d': ctx.x_2d, 'y_2d': ctx.y_2d,
+                'fclim_2d': result.fclim_2d,
+                'n': result.n, 'flag_err': result.flag_err})
 
 
 def calc_footprint_1d(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v_sigma=None, ustar=None,
@@ -483,8 +420,8 @@ MODEL_META = {
                 **MODEL_META)
 def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
          domain=None, dx=None, dy=None, nx=None, ny=None, rslayer=0,
-         smooth_data=1, tower=None, tower_crs=None, time=None, verbosity=0,
-         **kwargs) -> Footprint:
+         smooth=None, smooth_data=None, tower=None, tower_crs=None, time=None,
+         verbosity=0, **kwargs) -> Footprint:
     """Kljun et al. (2015) footprint as a :class:`~fluxprint.footprint.Footprint`.
 
     Thin wrapper over :func:`calc_ffp_climatology`. Accepts scalars (one record)
@@ -505,7 +442,10 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         dx, dy: Grid spacing [m].
         nx, ny: Grid element counts (alternative to ``dx``/``dy``).
         rslayer: Set ``1`` to compute even within the roughness sublayer.
-        smooth_data: Apply the standard smoothing kernel (``1``) or not (``0``).
+        smooth: Apply the standard smoothing kernel (generic spelling; wins
+            over ``smooth_data`` when both are given). Default on.
+        smooth_data: FFP-compatible spelling of ``smooth`` (kept for
+            downstream integrations).
         tower, tower_crs, time: Metadata attached to the returned footprint.
         verbosity: Passed through to the underlying routine.
 
@@ -516,7 +456,12 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
     # The generic pipeline: normalize -> grid -> loop -> Footprint. Only
     # _kljun_record (and the constants inside it) is Kljun physics.
     rslayer = 0 if rslayer is None else rslayer
-    smooth_data = 1 if smooth_data is None else smooth_data
+    # `smooth` is the generic spelling, `smooth_data` the FFP-compatible one
+    # (pinned by downstream integrations); `smooth` wins when both are given.
+    if smooth is not None:
+        smooth_data = smooth
+    elif smooth_data is None:
+        smooth_data = 1
 
     inputs = engine.normalize_inputs(
         zm=engine.listify(zm), ustar=engine.listify(ustar),

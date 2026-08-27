@@ -89,7 +89,6 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     required_keys = ['zm', 'z0', 'umean', 'ustar',
                      'pblh', 'mo_length', 'v_sigma', 'wind_dir'] + keep_cols
     aka_keys = ALIASES["model_inputs"]
-    core_keys = ['zm', 'wind_dir']
     optional_keys = ['z0', 'umean'] + keep_cols
 
     # If data is provided, extract values from the DataFrame
@@ -97,35 +96,23 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # Drop full nan columns
         data = data.dropna(axis=1, how='all')
 
-        # Use regex to match column names case-insensitively
+        # One scan per variable: the canonical name first, then each alias
+        # from ALIASES["model_inputs"] in declared order; per candidate an
+        # exact column match beats a case-insensitive one, and the first hit
+        # wins (the same resolution order map_footprints uses).
         inputs = {}
         for key in required_keys:
-            # Create a regex pattern to match the key case-insensitively
-            pattern = re.compile(f'^{re.escape(key)}$', re.IGNORECASE)
-            # Find matching columns in the DataFrame, prioritizing exact matches
-            matching_columns = [col for col in data.columns if col == key] + [
-                col for col in data.columns if pattern.match(col)]
-            
-            if matching_columns:
-                logger.debug(f'matching_columns: {matching_columns}')
-                # Use the first matching column
-                inputs[key] = data[matching_columns[0]].tolist()
-
-        # Use other names variables may be known for (e.g. wind direction, wind_dir, wd)
-        for key in required_keys:
-            for aka in aka_keys.get(key, []):
-                # Escape the alias: 'u*' must match the literal column name,
-                # not act as a quantifier (which would also swallow a plain
-                # 'U'/'u' wind-component column as friction velocity).
-                pattern = re.compile(f'^{re.escape(aka)}$', re.IGNORECASE)
-                # Find matching columns in the DataFrame, prioritizing exact matches
-                matching_columns = [col for col in data.columns if col == key] + [
-                    col for col in data.columns if pattern.match(col)]
-
-                # if aka in data.columns:
+            for cand in (key, *aka_keys.get(key, ())):
+                # Escape the candidate: 'u*' must match the literal column
+                # name, not act as a quantifier (which would also swallow a
+                # plain 'U'/'u' wind-component column as friction velocity).
+                pattern = re.compile(f'^{re.escape(cand)}$', re.IGNORECASE)
+                matching_columns = [c for c in data.columns if c == cand] + [
+                    c for c in data.columns if pattern.match(c)]
                 if matching_columns:
-                    logger.debug(f'aka: {matching_columns[0]}')
-                    inputs[key] = data[matching_columns[0]]
+                    logger.debug('%s <- column %r', key, matching_columns[0])
+                    inputs[key] = data[matching_columns[0]].tolist()
+                    break
 
         # Check if the key is provided as a keyword argument
         for key in required_keys:
@@ -190,9 +177,10 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
                 inputs[key] = value
                 estimated.append(key)
 
-    # Core inputs are mandatory (after any estimation), and the models need
-    # either z0 or umean (z0 takes precedence when both are present).
-    missing_keys = [key for key in core_keys if inputs.get(key) is None]
+    # Required (non-optional) inputs must be present after estimation, and
+    # the models need either z0 or umean (z0 wins when both are given).
+    missing_keys = [key for key in required_keys
+                    if key not in optional_keys and inputs.get(key) is None]
     if inputs.get('z0') is None and inputs.get('umean') is None:
         missing_keys.append('z0 or umean')
     if missing_keys:
@@ -201,15 +189,6 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
             f"approximation (estimate_missing_variables=True; set fill_all=True "
             f"for crude constant fallbacks).")
 
-    # Remaining required (non-optional) inputs must also be present.
-    missing_keys = [key for key in required_keys
-                    if key not in optional_keys and inputs.get(key) is None]
-    if missing_keys:
-        raise ValueError(
-            f"Missing required inputs: {missing_keys}. Provide them, or enable "
-            f"approximation (estimate_missing_variables=True; set fill_all=True "
-            f"for crude constant fallbacks).")
-    
     # Get the maximum length of the inputs
     max_len_inputs = max(len(v) if isinstance(
         v, (list, np.ndarray)) else 1 for v in inputs.values())

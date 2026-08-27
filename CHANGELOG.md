@@ -69,6 +69,15 @@ step (CI-enforced).
   The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
   generic `Footprint.weighted_mean()`.
 
+### Changed
+- Column-alias resolution in `process_footprint_inputs` is now one
+  first-match-wins scan (canonical name, then the `ALIASES` spellings in
+  declared order), matching `map_footprints`. Two edge cases change: with
+  two different alias columns present (e.g. `wd` and `wind_direction`) the
+  first declared alias now wins instead of the last, and a
+  case-insensitively matched canonical column (e.g. `WIND_DIR`) now beats an
+  exact alias column. Resolved values are consistently lists.
+
 ### Deprecated
 - `fluxprint.utils.get_contour_levels()` / `get_contour_vertices()`: use
   `Footprint.level_for()` / `Footprint.contours()`.

@@ -9,10 +9,8 @@ import numpy as np
 
 
 from ..exceptions import InputValidationError, exceptions, raise_ffp_exception
-from ..footprint import Footprint
 from ..grid import GridContext, resolve_grid
 from . import engine
-from .base import register_model
 
 logger = logging.getLogger('fluxprint.model.kljun_et_al_2015')
 
@@ -415,19 +413,21 @@ MODEL_META = {
 }
 
 
-@register_model("kljun2015",
-                description="Kljun et al. (2015) FFP parameterisation",
-                **MODEL_META)
-def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
-         domain=None, dx=None, dy=None, nx=None, ny=None, rslayer=0,
-         smooth=None, smooth_data=None, tower=None, tower_crs=None, time=None,
-         verbosity=0, **kwargs) -> Footprint:
-    """Kljun et al. (2015) footprint as a :class:`~fluxprint.footprint.Footprint`.
+#: The registered model is the generic pipeline wrapped around _kljun_record —
+#: only the kernel (and the constants inside it) is Kljun physics. The
+#: decorator supplies the canonical signature, the driver, provenance, and the
+#: kernel-protocol attributes (.kernel/.resolve_grid/.validate/...).
+calc = engine.footprint_model(
+    "kljun2015", description="Kljun et al. (2015) FFP parameterisation",
+    meta=MODEL_META, options=("rslayer",), defaults={"rslayer": 0},
+    log=logger)(_kljun_record)
 
-    Thin wrapper over :func:`calc_ffp_climatology`. Accepts scalars (one record)
-    or equal-length sequences (composited into one footprint) and returns the
-    result on the model's regular grid in the local tower-centred frame. Provide
-    ``wind_dir`` for a north-up (geographically oriented) grid.
+calc.__doc__ = """Kljun et al. (2015) footprint as a :class:`~fluxprint.footprint.Footprint`.
+
+    Accepts scalars (one record) or equal-length sequences (composited into
+    one footprint) and returns the result on the model's regular grid in the
+    local tower-centred frame. Provide ``wind_dir`` for a north-up
+    (geographically oriented) grid.
 
     Args:
         zm: Measurement height above displacement [m].
@@ -447,46 +447,9 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         smooth_data: FFP-compatible spelling of ``smooth`` (kept for
             downstream integrations).
         tower, tower_crs, time: Metadata attached to the returned footprint.
-        verbosity: Passed through to the underlying routine.
+        verbosity: 2 logs progress, 1 only fatal problems, 0 silent.
 
     Returns:
         A local-frame :class:`~fluxprint.footprint.Footprint` (``n`` = records
         composited; ``attrs["flag_err"]`` carries the model error flag).
     """
-    # The generic pipeline: normalize -> grid -> loop -> Footprint. Only
-    # _kljun_record (and the constants inside it) is Kljun physics.
-    rslayer = 0 if rslayer is None else rslayer
-    # `smooth` is the generic spelling, `smooth_data` the FFP-compatible one
-    # (pinned by downstream integrations); `smooth` wins when both are given.
-    if smooth is not None:
-        smooth_data = smooth
-    elif smooth_data is None:
-        smooth_data = 1
-
-    inputs = engine.normalize_inputs(
-        zm=engine.listify(zm), ustar=engine.listify(ustar),
-        pblh=engine.listify(pblh), mo_length=engine.listify(mo_length),
-        v_sigma=engine.listify(v_sigma), wind_dir=engine.listify(wind_dir),
-        z0=engine.listify(z0), umean=engine.listify(umean),
-        verbosity=verbosity)
-    spec = resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny)
-    result = engine.run_climatology(
-        _kljun_record, ctx=GridContext(spec), inputs=inputs,
-        opts={"rslayer": rslayer}, validate=engine.ffp_validate,
-        smooth_data=smooth_data, verbosity=verbosity)
-    return engine.build_footprint(
-        result, name="kljun2015", meta=MODEL_META,
-        wind_profile_input="umean" if z0 is None else "z0",
-        settings={"rslayer": int(rslayer),
-                  "smooth_data": int(bool(smooth_data))},
-        tower=tower, tower_crs=tower_crs, time=time, log=logger)
-
-
-#: Kernel protocol (used by empty_footprint and map_footprints): the model's
-#: grid is the generic FFP grid, its physics one per-record kernel, its
-#: validation the FFP checks, and `rslayer` its only model-specific option.
-calc.resolve_grid = resolve_grid
-calc.kernel = _kljun_record
-calc.validate = engine.ffp_validate
-calc.model_options = ("rslayer",)
-calc.option_defaults = {"rslayer": 0}

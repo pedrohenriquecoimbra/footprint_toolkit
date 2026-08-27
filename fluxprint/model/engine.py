@@ -304,7 +304,8 @@ def build_footprint(result: ClimResult, *, name: str,
 
 def footprint_model(name: str, *, description: str = "",
                     meta: dict | None = None, validate: Callable | None = None,
-                    options: tuple = (), defaults: dict | None = None):
+                    options: tuple = (), defaults: dict | None = None,
+                    log: logging.Logger | None = None):
     """Register a per-record kernel as a complete footprint model.
 
     The decorated function is only the physics::
@@ -334,6 +335,8 @@ def footprint_model(name: str, *, description: str = "",
             kernel/validator via ``opts`` (e.g. ``("rslayer",)``) and
             recorded in the output's attrs.
         defaults: Default values for ``options`` entries.
+        log: Logger for the truncation warning (see :func:`build_footprint`);
+            pass the model module's logger to keep warnings attributed to it.
     """
     meta = dict(meta or {})
     validate_fn = ffp_validate if validate is None else validate
@@ -369,9 +372,9 @@ def footprint_model(name: str, *, description: str = "",
             return build_footprint(
                 result, name=name, meta=meta,
                 wind_profile_input="umean" if z0 is None else "z0",
-                settings={"smooth_data": int(bool(smooth_data)),
-                          **{k: opts[k] for k in options if k in opts}},
-                tower=tower, tower_crs=tower_crs, time=time)
+                settings={**{k: opts[k] for k in options if k in opts},
+                          "smooth_data": int(bool(smooth_data))},
+                tower=tower, tower_crs=tower_crs, time=time, log=log)
 
         calc.__name__ = f"{name}_calc"
         calc.__qualname__ = f"footprint_model.<locals>.{name}_calc"

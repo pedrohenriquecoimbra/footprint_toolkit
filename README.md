@@ -35,9 +35,11 @@ science:
 
 ## Features
 
-- **Footprint models** behind one interface, selected by name (currently
-  Kljun et al., 2015; Hsieh et al., 2000 is an experimental work in progress;
-  Kormann & Meixner, 2001 is planned).
+- **Footprint models** behind one interface, selected by name: Kljun et al.
+  (2015) and Hsieh et al. (2000, with the Detto et al. 2006 crosswind
+  expansion); Kormann & Meixner (2001) is planned. A new model is only its
+  physics — a per-record kernel registered with `@footprint_model` inherits
+  the grid, record loop, validation, smoothing and provenance.
 - **A typed footprint object** (`Footprint`): a 2-D source-area field on a fixed
   grid centred on the tower, plus `FootprintSeries` for time-ordered stacks.
 - **Two coordinate frames**: a local, tower-centred metric grid, and a

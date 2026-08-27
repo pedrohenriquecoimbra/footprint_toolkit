@@ -54,6 +54,20 @@ step (CI-enforced).
   `.validate`, `.model_options`, `.option_defaults` — attached by
   `@footprint_model` and by the Kljun adapter; `map_footprints` and
   `empty_footprint` are built on it.
+- **`hsieh2000` is a registered model**: Hsieh et al. (2000) with the Detto
+  et al. (2006) crosswind expansion, implemented as an analytic kernel on
+  the generic driver (`fluxprint/model/Hsieh_et_al_2000.py` shrank to
+  equations + registration; `peak_distance()` exposes Eq 19). The pre-0.4
+  experimental draft — never registered — is replaced: it rotated the grid
+  with a math-angle rotation and returned per-pixel fractions; the
+  registered model evaluates on the fixed grid via the wind-frame transform
+  and returns a proper m**-2 density. `z0` is required (no `umean` mode);
+  `pblh` participates only in validation. Pinned by a golden-snapshot
+  oracle (`tests/data/hsieh2000_reference.npz`, regenerate script alongside)
+  plus paper-derived invariants (cumulative `exp(-A/x)`, Eq 19 peak
+  distance, Detto Eq B4 crosswind spread) in `tests/test_hsieh_reference.py`.
+  The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
+  generic `Footprint.weighted_mean()`.
 
 ### Removed
 - The unreachable `crop` block in `calc_ffp_climatology` (never reachable

@@ -23,12 +23,14 @@ import numpy as np
 
 from ..exceptions import check_ffp_inputs, raise_ffp_exception
 from ..footprint import Footprint, smooth_field
+from ..grid import GridContext, resolve_grid
+from .base import register_model
 
 logger = logging.getLogger('fluxprint.model.engine')
 
 __all__ = ["NormalizedInputs", "MetRecord", "ClimResult", "listify",
            "normalize_inputs", "ffp_validate", "run_climatology",
-           "build_footprint"]
+           "build_footprint", "footprint_model"]
 
 
 class NormalizedInputs(NamedTuple):
@@ -293,3 +295,80 @@ def build_footprint(result: ClimResult, *, name: str,
                 "area fractions above that are unreachable. Enlarge `domain` "
                 "(or reduce `dx`) to capture more.", captured * 100)
     return fp
+
+
+def footprint_model(name: str, *, description: str = "",
+                    meta: dict | None = None, validate: Callable | None = None,
+                    options: tuple = (), defaults: dict | None = None):
+    """Register a per-record kernel as a complete footprint model.
+
+    The decorated function is only the physics::
+
+        @footprint_model("mymodel2026", meta={"model_doi": "..."})
+        def kernel(ctx, rec, opts):
+            ...
+            return f_2d, 0, 1   # (field, flag, valid)
+
+    The decorator composes the generic pipeline around it —
+    :func:`normalize_inputs` (with :func:`listify`), a
+    :func:`~fluxprint.grid.resolve_grid` grid, :func:`run_climatology`
+    and :func:`build_footprint` — and registers the resulting adapter, which
+    has the canonical model signature (the same one ``kljun2015`` exposes,
+    ``smooth_data`` included) and satisfies the ``FootprintModel`` protocol.
+    The kernel stays reachable as ``adapter.kernel`` and the grid hook as
+    ``adapter.resolve_grid`` (used by ``empty_footprint``).
+
+    Args:
+        name: Registry key (e.g. ``"hsieh2000"``).
+        description: Human-readable registry description.
+        meta: Provenance dict stamped into every output's attrs
+            (citation/DOI/reference version).
+        validate: ``(rec, opts, verbosity) -> bool`` per-record gate;
+            defaults to the FFP checks (:func:`ffp_validate`).
+        options: Names of model-specific keyword arguments forwarded to the
+            kernel/validator via ``opts`` (e.g. ``("rslayer",)``) and
+            recorded in the output's attrs.
+        defaults: Default values for ``options`` entries.
+    """
+    meta = dict(meta or {})
+    validate_fn = ffp_validate if validate is None else validate
+    option_defaults = dict(defaults or {})
+
+    def decorator(kernel: Callable):
+        def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir,
+                 z0=None, umean=None, domain=None, dx=None, dy=None,
+                 nx=None, ny=None, smooth_data=1, tower=None, tower_crs=None,
+                 time=None, verbosity=0, **kwargs) -> Footprint:
+            smooth_data = 1 if smooth_data is None else smooth_data
+            opts = dict(option_defaults)
+            for key in options:
+                if kwargs.get(key) is not None:
+                    opts[key] = kwargs[key]
+
+            inputs = normalize_inputs(
+                zm=listify(zm), ustar=listify(ustar), pblh=listify(pblh),
+                mo_length=listify(mo_length), v_sigma=listify(v_sigma),
+                wind_dir=listify(wind_dir), z0=listify(z0),
+                umean=listify(umean), verbosity=verbosity)
+            spec = resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny)
+            result = run_climatology(
+                kernel, ctx=GridContext(spec), inputs=inputs, opts=opts,
+                validate=validate_fn, smooth_data=smooth_data,
+                verbosity=verbosity)
+            return build_footprint(
+                result, name=name, meta=meta,
+                wind_profile_input="umean" if z0 is None else "z0",
+                settings={"smooth_data": int(bool(smooth_data)),
+                          **{k: opts[k] for k in options if k in opts}},
+                tower=tower, tower_crs=tower_crs, time=time)
+
+        calc.__name__ = f"{name}_calc"
+        calc.__qualname__ = f"footprint_model.<locals>.{name}_calc"
+        calc.__doc__ = (f"{description or name}: generic-pipeline footprint "
+                        f"model (kernel: {kernel.__module__}."
+                        f"{kernel.__qualname__}).")
+        calc.kernel = kernel
+        calc.resolve_grid = resolve_grid
+        return register_model(name, description=description, **meta)(calc)
+
+    return decorator

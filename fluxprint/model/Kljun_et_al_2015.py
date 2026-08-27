@@ -11,6 +11,7 @@ from scipy import signal as sg
 from ..exceptions import *
 from ..footprint import Footprint
 from ..grid import GridContext, resolve_grid
+from . import engine
 from .base import register_model
 
 logger = logging.getLogger('fluxprint.model.kljun_et_al_2015')
@@ -98,54 +99,17 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     """
 
     #===========================================================================
-    # Input check
+    # Input check (hoisted verbatim into fluxprint.model.engine)
     flag_err = 0
-        
-    # Check existence of required input pars
-    if None in [zm, pblh, mo_length, v_sigma, ustar] or (z0 is None and umean is None):
-        # miss_cols = [i for i, c in enumerate([zm, pblh, mo_length, v_sigma, ustar]) if c is None]
-        # logger.error(f"Missing columns: {'; '.join(miss_cols) if miss_cols else '`z0` and `umean`.'}")
-        raise_ffp_exception(1, verbosity)
-
-    # Convert all input items to lists
-    if not isinstance(zm, list): zm = [zm]
-    if not isinstance(pblh, list): pblh = [pblh]
-    if not isinstance(mo_length, list): mo_length = [mo_length]
-    if not isinstance(v_sigma, list): v_sigma = [v_sigma]
-    if not isinstance(ustar, list): ustar = [ustar]
-    if not isinstance(wind_dir, list): wind_dir = [wind_dir]
-    if not isinstance(z0, list): z0 = [z0]
-    if not isinstance(umean, list): umean = [umean]
-
-    # Check that all lists have same length, if not raise an error and exit
-    ts_len = len(ustar)
-    if any(len(lst) != ts_len for lst in [v_sigma, wind_dir, pblh, mo_length]):
-        # at least one list has a different length, exit with error message
-        raise_ffp_exception(11, verbosity)
-
-    # Special treatment for zm, which is allowed to have length 1 for any
-    # length >= 1 of all other parameters
-    if all(val is None for val in zm): raise_ffp_exception(12, verbosity)
-    if len(zm) == 1:
-        raise_ffp_exception(17, verbosity)
-        zm = [zm[0] for i in range(ts_len)]
-
-    # Resolve ambiguity if both z0 and umean are passed (defaults to using z0)
-    # If at least one value of z0 is passed, use z0 (by setting umean to None)
-    if not all(val is None for val in z0):
-        raise_ffp_exception(13, verbosity)
-        umean = [None for i in range(ts_len)]
-        # If only one value of z0 was passed, use that value for all footprints
-        if len(z0) == 1: z0 = [z0[0] for i in range(ts_len)]
-    elif len(umean) == ts_len and not all(val is None for val in umean):
-        raise_ffp_exception(14, verbosity)
-        z0 = [None for i in range(ts_len)]
-    else:
-        raise_ffp_exception(15, verbosity)
+    inputs = engine.normalize_inputs(
+        zm=zm, ustar=ustar, pblh=pblh, mo_length=mo_length, v_sigma=v_sigma,
+        wind_dir=wind_dir, z0=z0, umean=umean, verbosity=verbosity)
 
     # Rename lists as now the function expects time series of inputs
-    ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans = \
-            ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean
+    ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans = (
+        inputs.ustar, inputs.v_sigma, inputs.pblh, inputs.mo_length,
+        inputs.wind_dir, inputs.zm, inputs.z0, inputs.umean)
+    ts_len = inputs.ts_len
 
     #===========================================================================
     # Define computational domain: the reference's reconciliation rules moved

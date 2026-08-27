@@ -153,3 +153,23 @@ def test_aliases_drive_column_resolution():
     assert inputs["mo_length"] == [-50.0]
     assert inputs["v_sigma"] == [0.4]
     assert inputs["wind_dir"] == [180.0]
+
+
+# --------------------------------------------------------------------------- #
+# process_footprint_inputs: unsupported containers                            #
+# --------------------------------------------------------------------------- #
+def test_unsupported_data_container_raises_typeerror():
+    xr = pytest.importorskip("xarray")
+
+    from fluxprint.core import process_footprint_inputs
+
+    ds = xr.Dataset({"zm": ("time", [20.0]), "wind_dir": ("time", [180.0])})
+    with pytest.raises(TypeError, match="Dataset.*data_vars"):
+        process_footprint_inputs(data=ds)
+
+
+def test_unsupported_scalar_data_raises_typeerror():
+    from fluxprint.core import process_footprint_inputs
+
+    with pytest.raises(TypeError, match="Unsupported `data` container"):
+        process_footprint_inputs(data=[("zm", 20.0)])

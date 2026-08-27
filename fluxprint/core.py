@@ -165,11 +165,20 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     elif data is not None and isinstance(data, dict):
         # If DataFrame provided is a dict like kwargs
         data = {k: v for k, v in data.items() if v not in (None, '', [], {}, ())}
-        
+
         inputs = data
         inputs.update(kwargs)
+    elif data is not None:
+        # Previously any other container fell through to kwargs-only inputs and
+        # failed later with a confusing "missing inputs" error (or silently
+        # computed from kwargs alone).
+        raise TypeError(
+            f"Unsupported `data` container: {type(data).__name__}. Supported: "
+            "a pandas DataFrame or a dict of equal-length sequences "
+            "(calculate_footprint additionally accepts a URL string). For an "
+            "xarray.Dataset, pass dict(ds.data_vars) or ds.to_dataframe().")
     else:
-        # If no DataFrame is provided, use kwargs
+        # If no data is provided, use kwargs
         inputs = kwargs
 
     # Estimate missing inputs when enabled, in dependency order (mo_length

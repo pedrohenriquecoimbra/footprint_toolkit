@@ -6,6 +6,7 @@ from . import core, io, commons, model
 from .core import *  # noqa: F401,F403 (public API, bounded by core.__all__)
 from .io import *    # noqa: F401,F403 (public API, bounded by io.__all__)
 from .footprint import Footprint, FootprintSeries
+from .mapping import map_footprints
 from .version import __version__
 
 # Libraries should not configure logging; attach a no-op handler so the package
@@ -33,6 +34,7 @@ __all__ = [
     *io.__all__,
     "Footprint",
     "FootprintSeries",
+    "map_footprints",
     "model",
     "__version__",
 ]

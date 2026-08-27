@@ -482,6 +482,11 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         tower=tower, tower_crs=tower_crs, time=time, log=logger)
 
 
-#: Grid hook (used by empty_footprint): this model computes on the generic
-#: FFP grid, so its output grid is knowable without running it.
+#: Kernel protocol (used by empty_footprint and map_footprints): the model's
+#: grid is the generic FFP grid, its physics one per-record kernel, its
+#: validation the FFP checks, and `rslayer` its only model-specific option.
 calc.resolve_grid = resolve_grid
+calc.kernel = _kljun_record
+calc.validate = engine.ffp_validate
+calc.model_options = ("rslayer",)
+calc.option_defaults = {"rslayer": 0}

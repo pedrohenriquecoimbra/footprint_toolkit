@@ -143,11 +143,16 @@ class ClimResult(NamedTuple):
     flag_err: int
 
 
-def ffp_validate(rec: MetRecord, opts: dict, verbosity: int) -> bool:
-    """Default per-record validation: the FFP physical-plausibility checks."""
+def ffp_validate(rec: MetRecord, opts: dict, verbosity: int, *,
+                 quiet: bool = False) -> bool:
+    """Default per-record validation: the FFP physical-plausibility checks.
+
+    ``quiet=True`` suppresses the per-failure log records (for the mapped
+    path, which reports rejections once per block instead).
+    """
     return check_ffp_inputs(rec.ustar, rec.v_sigma, rec.pblh, rec.mo_length,
                             rec.wind_dir, rec.zm, rec.z0, rec.umean,
-                            opts.get("rslayer", 0), verbosity)
+                            opts.get("rslayer", 0), verbosity, quiet=quiet)
 
 
 def run_climatology(kernel: Callable, *, ctx, inputs: NormalizedInputs,
@@ -373,8 +378,12 @@ def footprint_model(name: str, *, description: str = "",
         calc.__doc__ = (f"{description or name}: generic-pipeline footprint "
                         f"model (kernel: {kernel.__module__}."
                         f"{kernel.__qualname__}).")
+        # The kernel protocol: what empty_footprint and map_footprints need.
         calc.kernel = kernel
         calc.resolve_grid = resolve_grid
+        calc.validate = validate_fn
+        calc.model_options = tuple(options)
+        calc.option_defaults = dict(option_defaults)
         return register_model(name, description=description, **meta)(calc)
 
     return decorator

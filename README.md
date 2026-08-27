@@ -184,8 +184,16 @@ their original implementation — CI enforces this.
 ## API reference
 
 ### Top level (`import fluxprint`)
-- `calculate_footprint(data, by=None, model="kljun2015", ...)` — footprint each
-  group of a table; returns a `FootprintSeries`.
+- `calculate_footprint(data, by=None, model="kljun2015", on_error="skip", ...)`
+  — footprint each group of a table; returns a `FootprintSeries`.
+  `on_error` decides what a failed group costs: drop it (`"skip"`), abort
+  (`"raise"`), or keep an all-NaN member with the reason in `attrs["error"]`
+  (`"nan"`).
+- `map_footprints(data, model="kljun2015", ...)` — the xarray/dask-native
+  compute path: maps the model's per-record kernel over arrays of any
+  dimensionality and returns a `DataArray` with dims `(*input_dims, y, x)`.
+  Lazy over dask-backed inputs; a bad record costs a NaN plane, never the
+  job; rejections are summarised once per block.
 - `wrapper(...)` — `calculate_footprint` + aggregation + optional file output.
 - `empty_footprint(model, domain=..., dx=...)` — a NaN template on the model's
   grid. This is the template API: use it to learn the exact output grid/shape
@@ -210,6 +218,9 @@ their original implementation — CI enforces this.
   of the full unit-integral footprint, not of the captured total).
 - `smoothed()` — the standard FFP 3×3 double-convolution smoothing, applicable
   to any footprint (`fluxprint.footprint.smooth_field` is the array primitive).
+- `weighted_mean(field, min_coverage=None)` — footprint-weighted mean of a
+  gridded quantity; owns the NaN mask and the coverage threshold, and returns
+  a uniform field unchanged whatever the normalization or truncation.
 - `plot(rs=None)` — matplotlib quick look (never calls `plt.show()`).
 - `to_netcdf` / `from_netcdf`, `to_tiff` / `from_tiff`, `to_xarray` /
   `from_xarray`, `to_shapefile`.

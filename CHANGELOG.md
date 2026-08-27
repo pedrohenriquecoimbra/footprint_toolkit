@@ -37,6 +37,23 @@ step (CI-enforced).
   domain+nx/dx+nx) and a dtype pin in the reference-equivalence suite; a
   downstream-contract test file pinning the surface fluxcom's FFPProvider
   depends on.
+- `map_footprints()`: the xarray/dask-native compute path. Maps the model's
+  per-record kernel over arrays of any dimensionality (aliases recognized)
+  and returns `(*input_dims, y, x)`; lazy over dask-backed inputs; pinned to
+  reproduce single-record model calls bitwise. Per-record validation is
+  silent on this path — rejections are summarised once per block instead of
+  logged one line per record.
+- `Footprint.weighted_mean(field, min_coverage=None)`: footprint-weighted
+  mean of a gridded quantity owning the NaN mask and coverage threshold; a
+  uniform field of 1.0 returns exactly 1.0 regardless of normalization or
+  domain truncation.
+- `calculate_footprint(on_error=...)`: `"skip"` (default, previous
+  behavior), `"raise"`, or `"nan"` — an all-NaN member per failed group with
+  the reason in `attrs["error"]`, so long batches keep one slot per group.
+- The kernel protocol on model callables: `.kernel`, `.resolve_grid`,
+  `.validate`, `.model_options`, `.option_defaults` — attached by
+  `@footprint_model` and by the Kljun adapter; `map_footprints` and
+  `empty_footprint` are built on it.
 
 ### Removed
 - The unreachable `crop` block in `calc_ffp_climatology` (never reachable

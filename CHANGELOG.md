@@ -5,7 +5,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to follow [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor releases may contain breaking changes, announced here).
 
-## [Unreleased]
+## [0.4.0] - in progress
+
+The genericization release: a model is only physics. The scaffolding every
+footprint model used to copy now lives in a generic layer, and the registered
+Kljun model remains bitwise identical to the vendored reference at every
+step (CI-enforced).
+
+### Added
+- `fluxprint.grid`: `GridSpec` (output shape/axes known without compute),
+  `resolve_grid()` (the FFP domain/dx/dy/nx/ny reconciliation rules, hoisted
+  verbatim), `GridContext` (cached cartesian + lazy polar coordinates), and
+  the wind-frame primitives `rotate_theta()` / `to_wind_frame()` with a
+  documented meteorological convention.
+- `fluxprint.model.engine`: the model-agnostic driver — `normalize_inputs()`,
+  `run_climatology()` (validate/accumulate/normalize/smooth loop with
+  reference-exact `flag_err` bookkeeping), `build_footprint()` (provenance
+  attrs + `captured_fraction` diagnostic), and the `@footprint_model`
+  decorator that turns a bare per-record kernel into a fully registered
+  model with the canonical signature.
+- The Kljun port now runs on this pipeline; its physics is the module-private
+  `_kljun_record` kernel (moved verbatim, bug-for-bug). The file shrank by
+  ~200 lines of scaffolding.
+- `smooth` as the generic spelling of the model-level smoothing knob;
+  `smooth_data` remains fully supported (downstream-pinned). `smooth` wins
+  when both are given.
+- `empty_footprint()` resolves the grid directly via the model's
+  `resolve_grid` hook — no more placeholder model run (microseconds instead
+  of milliseconds; grid equality with a real run is pinned by a test).
+- Regression safety net: grid-variant oracle cases (default/nx-only/dx-only/
+  domain+nx/dx+nx) and a dtype pin in the reference-equivalence suite; a
+  downstream-contract test file pinning the surface fluxcom's FFPProvider
+  depends on.
+
+### Removed
+- The unreachable `crop` block in `calc_ffp_climatology` (never reachable
+  through the package API). Passing `crop`/`rs` now emits a
+  `DeprecationWarning` pointing at `Footprint.contours()`/`level_for()`.
+
+## [0.3.1] - unreleased
 
 Additive generic-layer API (the 0.3.1 fast-follow); no model files touched.
 

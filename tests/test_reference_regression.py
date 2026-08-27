@@ -76,9 +76,43 @@ def test_registered_model_matches_reference_exactly(name, case):
     fp = get_model(name)(**{k: v for k, v in met.items()}, **GRID)
     expected, n = REFERENCE_ORACLES[name](**met)
     assert fp.n == n, f"{name}/{case}: composited record count differs"
+    assert fp.f.dtype == expected.dtype, (
+        f"{name}/{case}: field dtype differs from the reference")
     assert np.array_equal(fp.f, expected), (
         f"{name}/{case}: field differs from the reference implementation "
         f"(max abs diff {np.nanmax(np.abs(fp.f - expected)):.3e})")
+
+
+#: Grid-spec variants covering every branch of the domain/dx/dy/nx/ny
+#: resolution logic. The CASES battery above pins only the domain+dx+dy
+#: branch; any hoist of the grid code must keep all branches bitwise
+#: identical, axes included.
+GRID_VARIANTS = {
+    "default": {},
+    "nx-only": dict(nx=100),
+    "dx-only": dict(dx=20.0),
+    "domain-nx": dict(domain=[-200.0, 200.0, -200.0, 200.0], nx=150),
+    "dx-nx": dict(dx=15.0, nx=80),
+}
+
+
+@pytest.mark.parametrize("variant", sorted(GRID_VARIANTS))
+def test_registered_kljun_matches_reference_across_grid_specs(variant):
+    """Every grid-resolution branch stays bitwise identical to the reference."""
+    grid = GRID_VARIANTS[variant]
+    met = CASES["unstable-z0"]
+    fp = get_model("kljun2015")(**met, **grid)
+    out = reference.FFP_climatology(
+        zm=met["zm"], z0=met.get("z0"), umean=met.get("umean"),
+        ustar=met["ustar"], h=met["pblh"], ol=met["mo_length"],
+        sigmav=met["v_sigma"], wind_dir=met["wind_dir"],
+        rs=None, verbosity=0, fig=False, **grid)
+    expected = np.asarray(out["fclim_2d"])
+    assert fp.f.dtype == expected.dtype
+    assert fp.f.shape == expected.shape
+    assert np.array_equal(fp.f, expected)
+    assert np.array_equal(fp.x, np.asarray(out["x_2d"])[0, :])
+    assert np.array_equal(fp.y, np.asarray(out["y_2d"])[:, 0])
 
 
 def test_port_matches_reference_direct_call():

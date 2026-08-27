@@ -10,6 +10,7 @@ from scipy import signal as sg
 
 from ..exceptions import *
 from ..footprint import Footprint
+from ..grid import GridContext, resolve_grid
 from .base import register_model
 
 logger = logging.getLogger('fluxprint.model.kljun_et_al_2015')
@@ -147,50 +148,11 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
             ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean
 
     #===========================================================================
-    # Define computational domain
-    # Check passed values and make some smart assumptions
-    if isinstance(dx, numbers.Number) and dy is None: dy = dx
-    if isinstance(dy, numbers.Number) and dx is None: dx = dy
-    if not all(isinstance(item, numbers.Number) for item in [dx, dy]): dx = dy = None
-    if isinstance(nx, int) and ny is None: ny = nx
-    if isinstance(ny, int) and nx is None: nx = ny
-    if not all(isinstance(item, int) for item in [nx, ny]): nx = ny = None
-    if not isinstance(domain, list) or len(domain) != 4: domain = None
-
-    if all(item is None for item in [dx, nx, domain]):
-        # If nothing is passed, default domain is a square of 2 Km size centered
-        # at the tower with pizel size of 2 meters (hence a 1000x1000 grid)
-        domain = [-1000., 1000., -1000., 1000.]
-        dx = dy = 2.
-        nx = ny = 1000
-    elif domain is not None:
-        # If domain is passed, it takes the precendence over anything else
-        if dx is not None:
-            # If dx/dy is passed, takes precendence over nx/ny
-            nx = int((domain[1]-domain[0]) / dx)
-            ny = int((domain[3]-domain[2]) / dy)
-        else:
-            # If dx/dy is not passed, use nx/ny (set to 1000 if not passed)
-            if nx is None: nx = ny = 1000
-            # If dx/dy is not passed, use nx/ny
-            dx = (domain[1]-domain[0]) / float(nx)
-            dy = (domain[3]-domain[2]) / float(ny)
-    elif dx is not None and nx is not None:
-        # If domain is not passed but dx/dy and nx/ny are, define domain
-        domain = [-nx*dx/2, nx*dx/2, -ny*dy/2, ny*dy/2]
-    elif dx is not None:
-        # If domain is not passed but dx/dy is, define domain and nx/ny
-        domain = [-1000, 1000, -1000, 1000]
-        nx = int((domain[1]-domain[0]) / dx)
-        ny = int((domain[3]-domain[2]) / dy)
-    elif nx is not None:
-        # If domain and dx/dy are not passed but nx/ny is, define domain and dx/dy
-        domain = [-1000, 1000, -1000, 1000]
-        dx = (domain[1]-domain[0]) / float(nx)
-        dy = (domain[3]-domain[2]) / float(nx)
-
-    # Put domain into more convenient vars
-    xmin, xmax, ymin, ymax = domain
+    # Define computational domain: the reference's reconciliation rules moved
+    # verbatim into the model-agnostic fluxprint.grid.resolve_grid.
+    spec = resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny)
+    xmin, xmax, ymin, ymax = spec.domain
+    dx, dy = spec.dx, spec.dy
 
     # Define rslayer if not passed
     if rslayer is None: rslayer = 0
@@ -222,16 +184,11 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     k = 0.4 #von Karman
 
     #===========================================================================
-    # Define physical domain in cartesian and polar coordinates
-    # Cartesian coordinates
-    x = np.linspace(xmin, xmax, nx + 1)
-    y = np.linspace(ymin, ymax, ny + 1)
-    x_2d, y_2d = np.meshgrid(x, y)
-
-    # Polar coordinates
-    # Set theta such that North is pointing upwards and angles increase clockwise
-    rho = np.sqrt(x_2d**2 + y_2d**2)
-    theta = np.arctan2(x_2d, y_2d)
+    # Physical domain in cartesian and polar coordinates (same arrays as the
+    # inline code: GridContext builds them with identical numpy calls).
+    ctx = GridContext(spec)
+    x_2d, y_2d = ctx.x_2d, ctx.y_2d
+    rho, theta = ctx.rho, ctx.theta
 
     # initialize raster for footprint climatology
     fclim_2d = np.zeros(x_2d.shape)

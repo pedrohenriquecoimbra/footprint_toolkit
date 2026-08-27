@@ -21,11 +21,13 @@ from typing import Any, Callable, NamedTuple
 
 import numpy as np
 
-from ..exceptions import raise_ffp_exception
+from ..exceptions import check_ffp_inputs, raise_ffp_exception
+from ..footprint import smooth_field
 
 logger = logging.getLogger('fluxprint.model.engine')
 
-__all__ = ["NormalizedInputs", "listify", "normalize_inputs"]
+__all__ = ["NormalizedInputs", "MetRecord", "ClimResult", "listify",
+           "normalize_inputs", "ffp_validate", "run_climatology"]
 
 
 class NormalizedInputs(NamedTuple):
@@ -113,3 +115,122 @@ def normalize_inputs(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir,
                             mo_length=mo_length, v_sigma=v_sigma,
                             wind_dir=wind_dir, z0=z0, umean=umean,
                             ts_len=ts_len)
+
+
+class MetRecord(NamedTuple):
+    """One record's met inputs, exactly as provided (no coercion)."""
+
+    ustar: Any
+    v_sigma: Any
+    pblh: Any
+    mo_length: Any
+    wind_dir: Any
+    zm: Any
+    z0: Any
+    umean: Any
+
+
+class ClimResult(NamedTuple):
+    """Raw climatology output of :func:`run_climatology`."""
+
+    fclim_2d: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    n: int
+    flag_err: int
+
+
+def ffp_validate(rec: MetRecord, opts: dict, verbosity: int) -> bool:
+    """Default per-record validation: the FFP physical-plausibility checks."""
+    return check_ffp_inputs(rec.ustar, rec.v_sigma, rec.pblh, rec.mo_length,
+                            rec.wind_dir, rec.zm, rec.z0, rec.umean,
+                            opts.get("rslayer", 0), verbosity)
+
+
+def run_climatology(kernel: Callable, *, ctx, inputs: NormalizedInputs,
+                    opts: dict | None = None, validate: Callable = ffp_validate,
+                    smooth_data=1, pulse=None, verbosity=0) -> ClimResult:
+    """The model-agnostic climatology loop, hoisted verbatim from the port.
+
+    Per record: validate (invalid records are skipped with exception code
+    16), evaluate ``kernel(ctx, rec, opts) -> (f_2d, flag, valid)``,
+    accumulate. Then normalize the accumulated field by the number of valid
+    records and, when ``smooth_data`` is truthy, apply the standard FFP
+    smoothing (:func:`~fluxprint.footprint.smooth_field`).
+
+    ``flag_err`` bookkeeping reproduces the reference exactly: a nonzero
+    kernel flag (3: a record turned invalid mid-computation) latches, and
+    zero valid records *overwrites* it with 1.
+
+    Args:
+        kernel: Per-record model physics. Must not raise for per-record
+            invalidity (return ``valid=0`` instead), must not log, and must
+            treat ``ctx`` arrays as read-only.
+        ctx: :class:`~fluxprint.grid.GridContext` for the output grid.
+        inputs: :func:`normalize_inputs` output.
+        opts: Model-specific options passed through to ``kernel``/``validate``
+            (e.g. ``{"rslayer": 1}``).
+        validate: ``(rec, opts, verbosity) -> bool`` per-record gate.
+        smooth_data: Truthy to smooth the final climatology (FFP default).
+        pulse: Progress-log cadence; defaults to ~5% of the series.
+        verbosity: 2 logs progress, 1 only fatal problems, 0 silent.
+    """
+    opts = {} if opts is None else opts
+    flag_err = 0
+    fclim_2d = np.zeros(ctx.x_2d.shape)
+    ts_len = inputs.ts_len
+
+    # Define pulse if not passed
+    if pulse == None:
+        if ts_len <= 20:
+            pulse = 1
+        else:
+            pulse = int(ts_len / 20)
+
+    # Initialize logic array valids to those 'timestamps' for which all inputs are
+    # at least present (but not necessarily phisically plausible)
+    valids = [True if not any([val is None for val in vals]) else False
+              for vals in zip(inputs.ustar, inputs.v_sigma, inputs.pblh,
+                              inputs.mo_length, inputs.wind_dir, inputs.zm)]
+
+    records = map(MetRecord._make,
+                  zip(inputs.ustar, inputs.v_sigma, inputs.pblh,
+                      inputs.mo_length, inputs.wind_dir, inputs.zm,
+                      inputs.z0, inputs.umean))
+    for ix, rec in enumerate(records):
+        # Counter
+        if verbosity > 1 and ix % pulse == 0:
+            logger.info('Calculating footprint %d of %d', ix + 1, ts_len)
+
+        valids[ix] = validate(rec, opts, verbosity)
+
+        # If inputs are not valid, skip current footprint
+        if not valids[ix]:
+            raise_ffp_exception(16, verbosity)
+        else:
+            f_2d, flag, valid = kernel(ctx, rec, opts)
+            if flag:
+                flag_err = flag
+            if not valid:
+                valids[ix] = 0
+            # Add to footprint climatology raster
+            fclim_2d = fclim_2d + f_2d
+
+    #===========================================================================
+    # Continue if at least one valid footprint was calculated
+    n = sum(valids)
+    if n == 0:
+        logger.error("No footprint calculated")
+        flag_err = 1
+    else:
+        logger.info(f"{n} footprint calculated")
+        # Normalize and smooth footprint climatology
+        fclim_2d = fclim_2d / n
+
+        # Truthiness, not `is not None`: smooth_data=0 must actually disable
+        # smoothing as documented (it used to smooth anyway).
+        if smooth_data:
+            fclim_2d = smooth_field(fclim_2d)
+
+    return ClimResult(fclim_2d=fclim_2d, x=ctx.x, y=ctx.y, n=n,
+                      flag_err=flag_err)

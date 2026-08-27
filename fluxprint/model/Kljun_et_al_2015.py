@@ -2,10 +2,8 @@
 
 """
 
-import numbers
 import logging
 import numpy as np
-from scipy import signal as sg
 
 
 from ..exceptions import *
@@ -17,6 +15,96 @@ from .base import register_model
 logger = logging.getLogger('fluxprint.model.kljun_et_al_2015')
 
 # from __future__ import print_function
+
+
+def _kljun_record(ctx, rec, opts):
+    """Kljun et al. (2015) per-record footprint field on the fixed grid.
+
+    The FFP reference's loop body, moved verbatim (bug-for-bug: this path is
+    pinned bitwise to the vendored reference — do not clean anything up).
+    Returns ``(f_2d, flag, valid)``; ``flag=3`` marks a record that proved
+    invalid mid-computation (``log(zm/z0) <= psi_f``).
+    """
+    #===========================================================================
+    # Model parameters
+    a = 1.4524
+    b = -1.9914
+    c = 1.4622
+    d = 0.1359
+    ac = 2.17
+    bc = 1.66
+    cc = 20.0
+
+    oln = 5000 #limit to L for neutral scaling
+    k = 0.4 #von Karman
+
+    ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean = rec
+    x_2d = ctx.x_2d
+    rho = ctx.rho
+    theta = ctx.theta
+    flag = 0
+    valid = 1
+
+    #===========================================================================
+    # Rotate coordinates into wind direction
+    if wind_dir is not None:
+        rotated_theta = theta - wind_dir * np.pi / 180.
+
+    #===========================================================================
+    # Create real scale crosswind integrated footprint and dummy for
+    # rotated scaled footprint
+    fstar_ci_dummy = np.zeros(x_2d.shape)
+    f_ci_dummy = np.zeros(x_2d.shape)
+    xstar_ci_dummy = np.zeros(x_2d.shape)
+    px = np.ones(x_2d.shape)
+    if z0 is not None:
+        # Use z0
+        if mo_length <= 0 or mo_length >= oln:
+            xx = (1 - 19.0 * zm/mo_length)**0.25
+            psi_f = (np.log((1 + xx**2) / 2.) + 2. * np.log((1 + xx) / 2.) - 2. * np.arctan(xx) + np.pi/2)
+        elif mo_length > 0 and mo_length < oln:
+            psi_f = -5.3 * zm / mo_length
+        if (np.log(zm / z0)-psi_f)>0:
+            xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
+            px = np.where(xstar_ci_dummy > d)
+            fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
+            f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
+        else:
+            flag = 3
+            valid = 0
+    else:
+        # Use umean if z0 not available
+        xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (umean / ustar * k))
+        px = np.where(xstar_ci_dummy > d)
+        fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
+        f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (umean / ustar * k))
+
+    #===========================================================================
+    # Calculate dummy for scaled sig_y* and real scale sig_y
+    sigystar_dummy = np.zeros(x_2d.shape)
+    sigystar_dummy[px] = (ac * np.sqrt(bc * np.abs(xstar_ci_dummy[px])**2 / (1 +
+                          cc * np.abs(xstar_ci_dummy[px]))))
+
+    if abs(mo_length) > oln:
+        mo_length = -1E6
+    if mo_length <= 0:   #convective
+        scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.80
+    elif mo_length > 0:  #stable
+        scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.55
+    if scale_const > 1:
+        scale_const = 1.0
+
+    sigy_dummy = np.zeros(x_2d.shape)
+    sigy_dummy[px] = (sigystar_dummy[px] / scale_const * zm * v_sigma / ustar)
+    sigy_dummy[sigy_dummy < 0] = np.nan
+
+    #===========================================================================
+    # Calculate real scale f(x,y)
+    f_2d = np.zeros(x_2d.shape)
+    f_2d[px] = (f_ci_dummy[px] / (np.sqrt(2 * np.pi) * sigy_dummy[px]) *
+                np.exp(-(rho[px] * np.sin(rotated_theta[px]))**2 / ( 2. * sigy_dummy[px]**2)))
+
+    return f_2d, flag, valid
 
 
 def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v_sigma=None, ustar=None,
@@ -135,136 +223,24 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
             pulse = int(ts_len / 20)
 
     #===========================================================================
-    # Model parameters
-    a = 1.4524
-    b = -1.9914
-    c = 1.4622
-    d = 0.1359
-    ac = 2.17
-    bc = 1.66
-    cc = 20.0
-        
-    oln = 5000 #limit to L for neutral scaling
-    k = 0.4 #von Karman
-
-    #===========================================================================
-    # Physical domain in cartesian and polar coordinates (same arrays as the
-    # inline code: GridContext builds them with identical numpy calls).
+    # Physical domain (fluxprint.grid); the per-record physics is
+    # _kljun_record, driven by the model-agnostic engine loop below.
     ctx = GridContext(spec)
     x_2d, y_2d = ctx.x_2d, ctx.y_2d
-    rho, theta = ctx.rho, ctx.theta
-
-    # initialize raster for footprint climatology
-    fclim_2d = np.zeros(x_2d.shape)
 
     #===========================================================================
-    # Loop on time series
+    # Loop on time series, accumulation, normalization and smoothing: hoisted
+    # verbatim into engine.run_climatology.
+    result = engine.run_climatology(
+        _kljun_record, ctx=ctx, inputs=inputs, opts={"rslayer": rslayer},
+        validate=engine.ffp_validate, smooth_data=smooth_data, pulse=pulse,
+        verbosity=verbosity)
+    fclim_2d = result.fclim_2d
+    n = result.n
+    flag_err = result.flag_err
 
-    # Initialize logic array valids to those 'timestamps' for which all inputs are
-    # at least present (but not necessarily phisically plausible)
-    valids = [True if not any([val is None for val in vals]) else False \
-              for vals in zip(ustars, sigmavs, hs, ols, wind_dirs, zms)]
-
-    # if verbosity > 1: logger.info('')
-    for ix, (ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean) \
-            in enumerate(zip(ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans)):
-
-        # Counter
-        if verbosity > 1 and ix % pulse == 0:
-            logger.info('Calculating footprint %d of %d', ix + 1, ts_len)
-
-        valids[ix] = check_ffp_inputs(ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean, rslayer, verbosity)
-
-        # If inputs are not valid, skip current footprint
-        if not valids[ix]:
-            raise_ffp_exception(16, verbosity)
-        else:
-            #===========================================================================
-            # Rotate coordinates into wind direction
-            if wind_dir is not None:
-                rotated_theta = theta - wind_dir * np.pi / 180.
-
-            #===========================================================================
-            # Create real scale crosswind integrated footprint and dummy for
-            # rotated scaled footprint
-            fstar_ci_dummy = np.zeros(x_2d.shape)
-            f_ci_dummy = np.zeros(x_2d.shape)
-            xstar_ci_dummy = np.zeros(x_2d.shape)
-            px = np.ones(x_2d.shape)
-            if z0 is not None:
-                # Use z0
-                if mo_length <= 0 or mo_length >= oln:
-                    xx = (1 - 19.0 * zm/mo_length)**0.25
-                    psi_f = (np.log((1 + xx**2) / 2.) + 2. * np.log((1 + xx) / 2.) - 2. * np.arctan(xx) + np.pi/2)
-                elif mo_length > 0 and mo_length < oln:
-                    psi_f = -5.3 * zm / mo_length
-                if (np.log(zm / z0)-psi_f)>0:
-                    xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
-                    px = np.where(xstar_ci_dummy > d)
-                    fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
-                    f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
-                else:
-                    flag_err = 3
-                    valids[ix] = 0
-            else:
-                # Use umean if z0 not available
-                xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (umean / ustar * k))
-                px = np.where(xstar_ci_dummy > d)
-                fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
-                f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (umean / ustar * k))
-
-            #===========================================================================
-            # Calculate dummy for scaled sig_y* and real scale sig_y
-            sigystar_dummy = np.zeros(x_2d.shape)
-            sigystar_dummy[px] = (ac * np.sqrt(bc * np.abs(xstar_ci_dummy[px])**2 / (1 +
-                                  cc * np.abs(xstar_ci_dummy[px]))))
-
-            if abs(mo_length) > oln:
-                mo_length = -1E6
-            if mo_length <= 0:   #convective
-                scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.80
-            elif mo_length > 0:  #stable
-                scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.55
-            if scale_const > 1:
-                scale_const = 1.0
-
-            sigy_dummy = np.zeros(x_2d.shape)
-            sigy_dummy[px] = (sigystar_dummy[px] / scale_const * zm * v_sigma / ustar)
-            sigy_dummy[sigy_dummy < 0] = np.nan
-
-            #===========================================================================
-            # Calculate real scale f(x,y)
-            f_2d = np.zeros(x_2d.shape)
-            f_2d[px] = (f_ci_dummy[px] / (np.sqrt(2 * np.pi) * sigy_dummy[px]) *
-                        np.exp(-(rho[px] * np.sin(rotated_theta[px]))**2 / ( 2. * sigy_dummy[px]**2)))
-
-            #===========================================================================
-            # Add to footprint climatology raster
-            fclim_2d = fclim_2d + f_2d
-
-    #===========================================================================
-    # Continue if at least one valid footprint was calculated
-    n = sum(valids)
     clevs = None
-    if n==0:
-        logger.error("No footprint calculated")
-        flag_err = 1
-    else:
-        logger.info(f"{n} footprint calculated")
-        #===========================================================================
-        # Normalize and smooth footprint climatology
-        fclim_2d = fclim_2d / n
-
-        # Truthiness, not `is not None`: smooth_data=0 must actually disable
-        # smoothing as documented (it used to smooth anyway).
-        if smooth_data:
-            # np.matrix is pending removal from numpy; same kernel values.
-            skernel  = np.array([[0.05, 0.1, 0.05],
-                                 [0.10, 0.4, 0.10],
-                                 [0.05, 0.1, 0.05]])
-            fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
-            fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
-
+    if n:
         #===========================================================================
         # Crop domain and footprint to the largest rs value
         if crop:

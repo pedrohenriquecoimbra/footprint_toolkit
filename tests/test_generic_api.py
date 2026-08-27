@@ -77,3 +77,49 @@ def test_utils_smooth_data_deprecated_and_delegates():
     with pytest.warns(DeprecationWarning, match="smooth_field"):
         out = utils.smooth_data(f)
     assert np.array_equal(out, smooth_field(f))
+
+
+# --------------------------------------------------------------------------- #
+# Footprint.level_for / captured_fraction                                     #
+# --------------------------------------------------------------------------- #
+def test_level_for_analytic_gaussian():
+    # For an isotropic 2-D Gaussian with peak p, the level enclosing a mass
+    # fraction r is p * (1 - r).
+    fp = _gaussian(nx=201, ny=201, dx=5.0, sigma=100.0)
+    peak = float(fp.f.max())
+    for r in (0.5, 0.8):
+        assert fp.level_for(r) == pytest.approx(peak * (1 - r), rel=0.02)
+
+
+def test_level_for_accepts_percentages():
+    fp = _gaussian()
+    assert fp.level_for(80) == fp.level_for(0.8)
+
+
+def test_level_for_matches_contours_level():
+    fp = _gaussian()
+    contour = fp.contours(0.5)[0]
+    assert fp.level_for(0.5) == contour["level"]
+
+
+def test_level_for_out_of_range_raises():
+    fp = _gaussian()
+    with pytest.raises(ValueError, match=r"\(0, 0.9\]"):
+        fp.level_for(0.95)
+    with pytest.raises(ValueError, match=r"\(0, 0.9\]"):
+        fp.level_for(0.0)
+
+
+def test_level_for_unreachable_warns_and_returns_nan():
+    # A domain capturing far less than 50% of the flux.
+    fp = _gaussian(nx=5, ny=5, dx=5.0, sigma=1000.0)
+    assert fp.captured_fraction < 0.5
+    with pytest.warns(UserWarning, match="unreachable"):
+        assert np.isnan(fp.level_for(0.5))
+
+
+def test_captured_fraction_is_live_total():
+    fp = _gaussian(nx=201, ny=201, dx=5.0, sigma=100.0)
+    assert fp.captured_fraction == fp.total()
+    assert 0.9 < fp.captured_fraction <= 1.0
+    assert fp.normalized().captured_fraction == pytest.approx(1.0)

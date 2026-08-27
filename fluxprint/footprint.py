@@ -282,6 +282,20 @@ class Footprint:
         iy, ix = np.unravel_index(np.nanargmax(self.f), self.f.shape)
         return float(self.x[ix]), float(self.y[iy])
 
+    @property
+    def captured_fraction(self) -> float:
+        """Fraction of the model footprint captured by this domain.
+
+        Registered models return a field whose *full* (infinite-domain)
+        footprint integrates to one, so the integral over the truncated
+        domain (:meth:`total`) is the fraction of the flux the domain
+        captures. This property is live — it reflects the current field
+        (e.g. it becomes 1.0 after :meth:`normalized`) — while the
+        ``attrs["captured_fraction"]`` a model stamps records the value at
+        creation time. For an arbitrary field this is simply the integral.
+        """
+        return float(self.total())
+
     def normalized(self) -> "Footprint":
         """Return a copy whose field integrates to one over the domain.
 
@@ -309,6 +323,49 @@ class Footprint:
                                            passes=passes))
         out.attrs["smoothed"] = 1
         return out
+
+    def _cumulative_field(self) -> tuple[np.ndarray, np.ndarray]:
+        """Finite field values sorted descending, and their cumulative integral."""
+        cell = self.dx * self.dy
+        if cell == 0:
+            raise ValueError("Cannot contour a degenerate (zero cell area) grid.")
+        sf = np.sort(self.f, axis=None)[::-1]
+        sf = sf[np.isfinite(sf)]
+        csf = np.cumsum(sf) * cell
+        return sf, csf
+
+    def level_for(self, r: float) -> float:
+        """Field level whose enclosed integral is nearest to fraction ``r``.
+
+        The source-area level: cells with ``f >= level_for(r)`` together
+        integrate to ``r`` of the *full* model footprint (which integrates to
+        one), **not** ``r`` of the flux the domain happens to capture — the
+        two definitions differ on any truncated domain, so state which one
+        you mean when reporting source areas. Cheap (no contour extraction);
+        :meth:`contours` uses the same search.
+
+        Args:
+            r: Source-area fraction in ``(0, 0.9]``; values above 1 are read
+                as percentages (``80`` -> ``0.8``).
+
+        Returns:
+            The field level, or ``nan`` (with a warning) when ``r`` exceeds
+            the fraction this domain captures (:attr:`captured_fraction`).
+        """
+        r = float(r) / 100.0 if r > 1 else float(r)
+        if not 0.0 < r <= 0.9:
+            raise ValueError(
+                f"Source-area fractions must be in (0, 0.9], got {r}; the "
+                "parameterisations are not defined beyond the 90% contour.")
+        sf, csf = self._cumulative_field()
+        captured = float(csf[-1]) if csf.size else 0.0
+        if captured <= 0 or r > captured:
+            warnings.warn(
+                f"The {r:.0%} source area is unreachable: the domain "
+                f"captures only {captured:.0%} of the flux. Enlarge "
+                "`domain` to close this contour.", UserWarning, stacklevel=2)
+            return float("nan")
+        return float(sf[int(np.argmin(np.abs(csf - r)))])
 
     def contours(self, rs: Any = (0.5, 0.8)) -> list[dict]:
         """Source-area isopleths: the contour enclosing ``r`` of the flux.
@@ -343,12 +400,7 @@ class Footprint:
                 "parameterisations are not defined beyond the 90% contour.")
         rs = sorted(rs)
 
-        cell = self.dx * self.dy
-        if cell == 0:
-            raise ValueError("Cannot contour a degenerate (zero cell area) grid.")
-        sf = np.sort(self.f, axis=None)[::-1]
-        sf = sf[np.isfinite(sf)]
-        csf = np.cumsum(sf) * cell
+        sf, csf = self._cumulative_field()
         captured = float(csf[-1]) if csf.size else 0.0
 
         out = []

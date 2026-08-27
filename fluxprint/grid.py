@@ -154,7 +154,7 @@ class GridContext:
     def __init__(self, spec: GridSpec):
         self.spec = spec
         self.x, self.y = spec.axes()
-        self.x_2d, self.y_2d = np.meshgrid(self.x, self.y)
+        self.x_2d, self.y_2d = spec.meshgrid()
         self._rho = None
         self._theta = None
 

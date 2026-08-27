@@ -334,6 +334,32 @@ class Footprint:
         csf = np.cumsum(sf) * cell
         return sf, csf
 
+    @staticmethod
+    def _as_fraction(value: float) -> float:
+        """Normalize a fraction argument: values above 1 are percentages."""
+        value = float(value)
+        return value / 100.0 if value > 1 else value
+
+    def _locate_level(self, r: float, sf: np.ndarray, csf: np.ndarray, *,
+                      stacklevel: int) -> tuple[float, float] | None:
+        """``(level, enclosed fraction)`` nearest to ``r``.
+
+        Returns ``None`` — after warning at ``stacklevel`` — when ``r``
+        exceeds the fraction this domain captures. Shared by
+        :meth:`level_for` and :meth:`contours`, so there is exactly one
+        definition of the source-area search.
+        """
+        captured = float(csf[-1]) if csf.size else 0.0
+        if captured <= 0 or r > captured:
+            warnings.warn(
+                f"The {r:.0%} source area is unreachable: the domain "
+                f"captures only {captured:.0%} of the flux. Enlarge "
+                "`domain` to close this contour.", UserWarning,
+                stacklevel=stacklevel)
+            return None
+        idx = int(np.argmin(np.abs(csf - r)))
+        return float(sf[idx]), float(csf[idx])
+
     def level_for(self, r: float) -> float:
         """Field level whose enclosed integral is nearest to fraction ``r``.
 
@@ -352,20 +378,14 @@ class Footprint:
             The field level, or ``nan`` (with a warning) when ``r`` exceeds
             the fraction this domain captures (:attr:`captured_fraction`).
         """
-        r = float(r) / 100.0 if r > 1 else float(r)
+        r = self._as_fraction(r)
         if not 0.0 < r <= 0.9:
             raise ValueError(
                 f"Source-area fractions must be in (0, 0.9], got {r}; the "
                 "parameterisations are not defined beyond the 90% contour.")
-        sf, csf = self._cumulative_field()
-        captured = float(csf[-1]) if csf.size else 0.0
-        if captured <= 0 or r > captured:
-            warnings.warn(
-                f"The {r:.0%} source area is unreachable: the domain "
-                f"captures only {captured:.0%} of the flux. Enlarge "
-                "`domain` to close this contour.", UserWarning, stacklevel=2)
-            return float("nan")
-        return float(sf[int(np.argmin(np.abs(csf - r)))])
+        located = self._locate_level(r, *self._cumulative_field(),
+                                     stacklevel=3)
+        return float("nan") if located is None else located[0]
 
     def weighted_mean(self, field: np.ndarray, *,
                       min_coverage: float | None = None) -> float:
@@ -405,8 +425,7 @@ class Footprint:
                 "cells; returning nan.", UserWarning, stacklevel=2)
             return float("nan")
         if min_coverage is not None:
-            mc = (float(min_coverage) / 100.0 if min_coverage > 1
-                  else float(min_coverage))
+            mc = self._as_fraction(min_coverage)
             coverage = wsum * self.dx * self.dy
             if coverage < mc:
                 warnings.warn(
@@ -442,7 +461,7 @@ class Footprint:
         """
         if isinstance(rs, (int, float)):
             rs = [rs]
-        rs = [float(r) / 100.0 if r > 1 else float(r) for r in rs]
+        rs = [self._as_fraction(r) for r in rs]
         if any(not 0.0 < r <= 0.9 for r in rs):
             raise ValueError(
                 f"Source-area fractions must be in (0, 0.9], got {rs}; the "
@@ -450,21 +469,15 @@ class Footprint:
         rs = sorted(rs)
 
         sf, csf = self._cumulative_field()
-        captured = float(csf[-1]) if csf.size else 0.0
 
         out = []
         for r in rs:
-            if captured <= 0 or r > captured:
-                warnings.warn(
-                    f"The {r:.0%} source area is unreachable: the domain "
-                    f"captures only {captured:.0%} of the flux. Enlarge "
-                    "`domain` to close this contour.", UserWarning,
-                    stacklevel=2)
+            located = self._locate_level(r, sf, csf, stacklevel=3)
+            if located is None:
                 out.append({"r": r, "level": float("nan"), "fraction": 0.0,
                             "vertices": [], "closed": False})
                 continue
-            idx = int(np.argmin(np.abs(csf - r)))
-            level = float(sf[idx])
+            level, fraction = located
             vertices = self._contour_vertices(level)
             # contourpy duplicates the closing vertex of a closed loop
             # exactly, so test exact equality: a relative tolerance would
@@ -473,7 +486,7 @@ class Footprint:
             closed = bool(vertices) and all(
                 len(seg) > 2 and np.array_equal(seg[0], seg[-1])
                 for seg in vertices)
-            out.append({"r": r, "level": level, "fraction": float(csf[idx]),
+            out.append({"r": r, "level": level, "fraction": fraction,
                         "vertices": vertices, "closed": closed})
         return out
 
@@ -1062,15 +1075,11 @@ class FootprintSeries:
         if ref.tower is None or ref.tower_crs is None:
             raise ValueError("tower and tower_crs are required to georeference.")
 
-        pyproj = _require("pyproj", "crs")
-        if target_crs is None:
-            target_crs = _tower_laea(pyproj, ref.tower, ref.tower_crs)
-        transformer = pyproj.Transformer.from_crs(
-            ref.tower_crs, target_crs, always_xy=True)
-        tx, ty = transformer.transform(ref.tower[0], ref.tower[1])
-        new_x, new_y = ref.x + tx, ref.y + ty
+        # One home for the transform: translate the first member, share its
+        # projected axes across the series (the grid is common by invariant).
+        geo = ref.georeference(target_crs)
         return FootprintSeries([
-            fp._replace(x=new_x, y=new_y, crs=target_crs)
+            fp._replace(x=geo.x, y=geo.y, crs=geo.crs)
             for fp in self.footprints])
 
     # -- NetCDF (optional: xarray / netcdf4) ------------------------------- #

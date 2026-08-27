@@ -69,10 +69,28 @@ step (CI-enforced).
   The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
   generic `Footprint.weighted_mean()`.
 
+### Deprecated
+- `fluxprint.utils.get_contour_levels()` / `get_contour_vertices()`: use
+  `Footprint.level_for()` / `Footprint.contours()`.
+- `fluxprint.template.DEFAULT_ATTRS` (PEP 562 warning on access): provenance
+  attrs are stamped by the models; `empty_footprint()` is the template API.
+- The remaining zero-caller legacy helpers in `fluxprint.utils` now warn:
+  `structuredData`, `transform_crs` (use `transform_coordinates`),
+  `center_footprint`/`update_affine` (use `Footprint.georeference()`),
+  `plot_footprint` (use `Footprint.plot()`), `is_footprint_dict`,
+  `find_utm_epsg_from_lon`, `find_middle_point`, `identify_convention`,
+  `attribute_crs`, `reproject_tif`.
+
 ### Removed
 - The unreachable `crop` block in `calc_ffp_climatology` (never reachable
   through the package API). Passing `crop`/`rs` now emits a
   `DeprecationWarning` pointing at `Footprint.contours()`/`level_for()`.
+- Dead code: an unreachable duplicate block in `utils.convert_to_object`, the
+  broken `utils.find_utm_epsg_from_lon_deprecated`, the unused
+  `commons.ensure_supported_dtype` machinery, the unused
+  `fluxprint.model.kljun2015_o` alias (the vendored reference stays
+  importable by its full path, and `import fluxprint` no longer loads it),
+  and leftover unused imports.
 
 ## [0.3.1] - unreleased
 

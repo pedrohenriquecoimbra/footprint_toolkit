@@ -204,6 +204,9 @@ their original implementation — CI enforces this.
   (model inputs and estimator drivers).
 - `read_handler` / `read_from_url` / `read_from_file` — table/NetCDF/TIFF readers.
 - Legacy `write_to_*` helpers are deprecated: use the `Footprint.to_*` methods.
+- `fluxprint.commons.start_logging(path)` — opt-in file logging for
+  applications: attaches a handler to the `fluxprint` logger (the package
+  itself stays silent by default via a `NullHandler`).
 
 ### `fluxprint.model`
 - `get_model(name)` — return the registered model callable.

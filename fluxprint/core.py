@@ -276,7 +276,7 @@ _MODEL_KEYS = frozenset({
 
 
 def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
-                        tower=None, tower_crs=None, **kwargs):
+                        tower=None, tower_crs=None, on_error="skip", **kwargs):
     """Compute footprints from tabular inputs as a :class:`FootprintSeries`.
 
     Rows are grouped by ``by`` (one composited footprint per group) and each
@@ -300,6 +300,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
         tower: ``(x, y)`` tower position, attached to each footprint for
             later georeferencing.
         tower_crs: CRS of ``tower``.
+        on_error: What to do when a group fails (the model raises, or no
+            record in the group is valid): ``"skip"`` (default) drops the
+            group with a logged warning; ``"raise"`` aborts on the first
+            failure; ``"nan"`` keeps the group's slot as an all-NaN
+            footprint on the model grid, with the reason in
+            ``attrs["error"]`` — so a long batch keeps one member per group.
         **kwargs: Model inputs / grid options (e.g. ``domain``, ``dx``, ``zm``)
             and per-call overrides.
 
@@ -309,6 +315,9 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     Raises:
         ValueError: If no footprint could be calculated from the data.
     """
+    if on_error not in ("skip", "raise", "nan"):
+        raise ValueError(
+            f"on_error must be 'skip', 'raise' or 'nan'; got {on_error!r}.")
     model_fn = _resolve_model(model)
 
     if isinstance(data, str):
@@ -336,26 +345,47 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
 
     footprints: list[Footprint] = []
     skipped = 0
+    nan_template = None
     for key, group in grouped:
         if isinstance(group, pd.DataFrame):
             group = group.to_dict(orient="list")
         time, label = _group_label(key)
         call = {**grid_defaults, **overrides,
                 **{k: v for k, v in group.items() if k in _MODEL_KEYS}}
+        failure = None
         try:
             fp = model_fn(tower=tower, tower_crs=tower_crs, time=time, **call)
         except Exception as exc:
-            # A failed group is skipped, never silently backfilled with another
-            # group's footprint. Re-raise instead of `continue` to abort instead.
+            # A failed group is never silently backfilled with another
+            # group's footprint: it is skipped, kept as NaN, or aborts,
+            # depending on on_error.
+            if on_error == "raise":
+                raise
             logger.debug("Traceback for failed group %r:", key, exc_info=True)
-            logger.warning("Footprint failed for group %r (%s); skipping.",
-                           key, exc)
-            skipped += 1
-            continue
-        if getattr(fp, "n", None) == 0:
-            logger.warning("Group %r had no valid records; skipping.", key)
-            skipped += 1
-            continue
+            logger.warning("Footprint failed for group %r (%s).", key, exc)
+            failure = str(exc) or type(exc).__name__
+        else:
+            if getattr(fp, "n", None) == 0:
+                if on_error == "raise":
+                    raise ValueError(
+                        f"Group {key!r} produced no valid records "
+                        "(on_error='raise').")
+                logger.warning("Group %r had no valid records.", key)
+                failure = "no valid records in group"
+        if failure is not None:
+            if on_error != "nan":
+                skipped += 1
+                continue
+            if nan_template is None:
+                # Grid-only, microseconds; the grid is invariant across
+                # groups (FootprintSeries enforces it regardless).
+                nan_template = empty_footprint(
+                    model=model_fn,
+                    **{k: call[k] for k in ("domain", "dx", "dy", "nx", "ny")
+                       if call.get(k) is not None})
+            fp = nan_template._replace(time=time, n=0,
+                                       tower=tower, tower_crs=tower_crs)
+            fp.attrs["error"] = failure
         if label is not None:
             if isinstance(label, (pd.Timestamp, datetime)):
                 # Keep attrs NetCDF-serializable: a raw Timestamp in attrs

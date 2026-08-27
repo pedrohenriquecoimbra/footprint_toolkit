@@ -137,6 +137,66 @@ def test_wrapper_tiff_requires_georeferenced():
                      model="kljun2015", **SMALL)
 
 
+def _poisoned_frame():
+    """Group B's records all fail validation (ustar <= 0.1) -> n == 0."""
+    df = _frame()
+    df.loc[df["plot"] == "B", "ustar"] = 0.05
+    return df
+
+
+def test_on_error_default_skip_drops_failed_group():
+    series = core.calculate_footprint(_poisoned_frame(), by="plot",
+                                      model="kljun2015", **SMALL)
+    assert series.nt == 1
+    assert series[0].attrs["group"] == "A"
+
+
+def test_on_error_nan_keeps_group_slots():
+    series = core.calculate_footprint(_poisoned_frame(), by="plot",
+                                      model="kljun2015", on_error="nan",
+                                      **SMALL)
+    assert series.nt == 2
+    good = next(fp for fp in series if fp.attrs["group"] == "A")
+    bad = next(fp for fp in series if fp.attrs["group"] == "B")
+    assert good.n == 2 and np.isfinite(good.f).all()
+    assert bad.n == 0
+    assert np.isnan(bad.f).all()
+    assert bad.attrs["error"] == "no valid records in group"
+    assert bad.f.shape == good.f.shape  # same grid: the series stays regular
+
+
+def test_on_error_raise_aborts_on_invalid_group():
+    with pytest.raises(ValueError, match="no valid records"):
+        core.calculate_footprint(_poisoned_frame(), by="plot",
+                                 model="kljun2015", on_error="raise", **SMALL)
+
+
+def test_on_error_nan_on_model_exception():
+    from fluxprint.model import get_model
+    kljun = get_model("kljun2015")
+    calls = {"n": 0}
+
+    def flaky_model(**kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return kljun(**kw)
+
+    series = core.calculate_footprint(_frame(), by="plot", model=flaky_model,
+                                      on_error="nan", **SMALL)
+    assert series.nt == 2
+    bad = [fp for fp in series if "error" in fp.attrs]
+    assert len(bad) == 1
+    assert "boom" in bad[0].attrs["error"]
+    assert np.isnan(bad[0].f).all()
+
+
+def test_on_error_rejects_unknown_policy():
+    with pytest.raises(ValueError, match="on_error"):
+        core.calculate_footprint(_frame(), model="kljun2015",
+                                 on_error="ignore", **SMALL)
+
+
 def test_empty_footprint_has_grid_and_nan_field():
     t = core.empty_footprint(model="kljun2015", dx=20, domain=[-200, 200, -200, 200])
     assert isinstance(t, Footprint)

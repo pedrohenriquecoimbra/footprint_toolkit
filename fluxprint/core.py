@@ -375,36 +375,39 @@ def empty_footprint(model="kljun2015", *, domain=None, dx=None, dy=None,
                     **kwargs) -> Footprint:
     """Return an empty (NaN) Footprint matching the model's grid.
 
-    Runs the selected model once with placeholder inputs to obtain the exact
-    grid it would produce for ``domain``/``dx``/``dy``, then blanks the field.
-    Useful as a template (to pre-allocate, or to report the output shape)
-    without computing a real footprint. Call ``.to_xarray()`` on the result for
-    an empty DataArray/Dataset.
+    This is the template API: it resolves the exact grid the model would
+    produce for ``domain``/``dx``/``dy``/``nx``/``ny`` — via the model's
+    ``resolve_grid`` hook (:func:`fluxprint.grid.resolve_grid` by default) —
+    without running the model, so it costs microseconds. Useful to
+    pre-allocate, or to know the output shape/coordinates in advance. Call
+    ``.to_xarray()`` on the result for an empty DataArray/Dataset.
 
     Args:
         model: Registered model name or a FootprintModel callable.
-        domain: ``[xmin, xmax, ymin, ymax]`` in metres (model default if None).
-        dx, dy: Grid spacing in metres.
-        **kwargs: Other grid options forwarded to the model (e.g. ``nx``/``ny``).
+        domain: ``[xmin, xmax, ymin, ymax]`` in metres (defaults to the batch
+            default, a tower-centred 1 km box).
+        dx, dy: Grid spacing in metres (``dx`` defaults to 10).
+        **kwargs: Other grid options (``nx``/``ny``).
 
     Returns:
         Footprint: The grid/coords of a real footprint, with ``f`` all NaN.
     """
+    from . import grid as _grid
+
     model_fn = _resolve_model(model)
-    grid = {"domain": domain if domain is not None else [-500, 500, -500, 500],
-            "dx": dx if dx is not None else 10, "verbosity": 0}
+    spec_kwargs = {
+        "domain": domain if domain is not None else [-500, 500, -500, 500],
+        "dx": dx if dx is not None else 10,
+    }
     if dy is not None:
-        grid["dy"] = dy
-    grid.update({k: v for k, v in kwargs.items() if k in _MODEL_KEYS})
+        spec_kwargs["dy"] = dy
+    spec_kwargs.update({k: v for k, v in kwargs.items() if k in ("nx", "ny")})
 
-    # Safe placeholder met inputs: the grid is independent of their values, and
-    # these avoid tripping the model's input validation. Skip any already given.
-    placeholders = {"zm": 2.0, "umean": 2.0, "ustar": 0.3, "pblh": 1000.0,
-                    "mo_length": -100.0, "v_sigma": 0.5, "wind_dir": 0.0}
-    placeholders = {k: v for k, v in placeholders.items() if k not in grid}
-
-    fp = model_fn(**grid, **placeholders)
-    return fp._replace(f=np.full(fp.f.shape, np.nan, dtype=fp.f.dtype))
+    resolver = getattr(model_fn, "resolve_grid", _grid.resolve_grid)
+    spec = resolver(**spec_kwargs)
+    x, y = spec.axes()
+    attrs = {"model": model} if isinstance(model, str) else {}
+    return Footprint(f=np.full(spec.shape, np.nan), x=x, y=y, attrs=attrs)
 
 
 def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,

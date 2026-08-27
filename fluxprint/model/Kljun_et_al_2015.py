@@ -535,3 +535,8 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         settings={"rslayer": int(rslayer),
                   "smooth_data": int(bool(smooth_data))},
         tower=tower, tower_crs=tower_crs, time=time, log=logger)
+
+
+#: Grid hook (used by empty_footprint): this model computes on the generic
+#: FFP grid, so its output grid is knowable without running it.
+calc.resolve_grid = resolve_grid

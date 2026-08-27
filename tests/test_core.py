@@ -144,3 +144,18 @@ def test_empty_footprint_has_grid_and_nan_field():
     assert t.f.shape == (nx + 1, nx + 1)
     assert np.isnan(t.f).all()
     assert not t.is_georeferenced
+
+
+def test_empty_footprint_grid_identical_to_a_model_run():
+    """The grid-hook path must reproduce the model's own grid exactly."""
+    from fluxprint.model import get_model
+
+    t = core.empty_footprint(model="kljun2015", dx=20,
+                             domain=[-200, 200, -200, 200])
+    fp = get_model("kljun2015")(
+        zm=2.0, umean=2.0, ustar=0.3, pblh=1000.0, mo_length=-100.0,
+        v_sigma=0.5, wind_dir=0.0, dx=20, domain=[-200, 200, -200, 200],
+        verbosity=0)
+    assert np.array_equal(t.x, fp.x)
+    assert np.array_equal(t.y, fp.y)
+    assert t.f.shape == fp.f.shape

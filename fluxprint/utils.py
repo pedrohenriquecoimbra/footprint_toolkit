@@ -185,10 +185,13 @@ def find_peak(array):
 
 
 def smooth_data(data):
-    skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
-    data = sg.convolve2d(data, skernel, mode='same')
-    data = sg.convolve2d(data, skernel, mode='same')
-    return data
+    """Deprecated alias of :func:`fluxprint.footprint.smooth_field`."""
+    warnings.warn(
+        "fluxprint.utils.smooth_data is deprecated and will be removed in a "
+        "future release; use fluxprint.footprint.smooth_field() instead.",
+        DeprecationWarning, stacklevel=2)
+    from .footprint import smooth_field
+    return smooth_field(data)
 
 def transform_crs(*xy, crs_in="EPSG:4326", crs_out="EPSG:3035"):
     transformer = Transformer.from_crs(crs_in, crs_out)

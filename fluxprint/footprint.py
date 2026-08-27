@@ -37,7 +37,41 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("fluxprint.footprint")
 
-__all__ = ["Footprint", "FootprintSeries", "laea_crs"]
+__all__ = ["Footprint", "FootprintSeries", "laea_crs", "smooth_field",
+           "FFP_SMOOTH_KERNEL"]
+
+#: The standard FFP 3x3 smoothing kernel (Kljun et al. 2015). One smoothing
+#: pass is one 2-D convolution with this kernel; the reference procedure
+#: applies it twice.
+FFP_SMOOTH_KERNEL = np.array([[0.05, 0.1, 0.05],
+                              [0.10, 0.4, 0.10],
+                              [0.05, 0.1, 0.05]])
+
+
+def smooth_field(f: np.ndarray, kernel: np.ndarray | None = None,
+                 passes: int = 2) -> np.ndarray:
+    """Smooth a 2-D footprint field with the standard FFP kernel.
+
+    This is the model-agnostic smoothing step of the reference FFP procedure:
+    ``passes`` 2-D convolutions (``mode="same"``) with the 3x3
+    :data:`FFP_SMOOTH_KERNEL`. It applies to any footprint field, not just
+    Kljun's. Requires ``scipy``.
+
+    Args:
+        f: 2-D field to smooth.
+        kernel: Alternative convolution kernel; defaults to
+            :data:`FFP_SMOOTH_KERNEL`.
+        passes: Number of convolution passes (the FFP reference uses 2).
+
+    Returns:
+        The smoothed field (a new array; ``f`` is not modified).
+    """
+    sg = _require("scipy.signal", "")  # scipy is a core dependency
+    kernel = FFP_SMOOTH_KERNEL if kernel is None else np.asarray(kernel)
+    out = np.asarray(f)
+    for _ in range(passes):
+        out = sg.convolve2d(out, kernel, mode="same")
+    return out
 
 
 def _require(module: str, extra: str) -> Any:
@@ -261,6 +295,20 @@ class Footprint:
                 "Cannot normalize a footprint whose integral is zero (empty "
                 "field, or a degenerate single-row/column grid).")
         return self._replace(f=self.f / scale)
+
+    def smoothed(self, kernel: np.ndarray | None = None,
+                 passes: int = 2) -> "Footprint":
+        """Return a copy smoothed with the standard FFP kernel.
+
+        Applies :func:`smooth_field` (``passes`` convolutions with the 3x3
+        :data:`FFP_SMOOTH_KERNEL`) to the field — the same smoothing the
+        reference FFP procedure applies to a climatology, usable with any
+        footprint model. The copy records ``attrs["smoothed"] = 1``.
+        """
+        out = self._replace(f=smooth_field(self.f, kernel=kernel,
+                                           passes=passes))
+        out.attrs["smoothed"] = 1
+        return out
 
     def contours(self, rs: Any = (0.5, 0.8)) -> list[dict]:
         """Source-area isopleths: the contour enclosing ``r`` of the flux.
@@ -869,12 +917,7 @@ class FootprintSeries:
         """
         fclim = np.nanmean(self.stack(), axis=0)
         if smooth:
-            sg = _require("scipy.signal", "")  # scipy is a core dependency
-            kernel = np.array([[0.05, 0.1, 0.05],
-                               [0.10, 0.4, 0.10],
-                               [0.05, 0.1, 0.05]])
-            fclim = sg.convolve2d(fclim, kernel, mode="same")
-            fclim = sg.convolve2d(fclim, kernel, mode="same")
+            fclim = smooth_field(fclim)
         counts = [fp.n for fp in self.footprints if fp.n is not None]
         ref = self.footprints[0]
         # Carry provenance the members agree on (e.g. 'model',

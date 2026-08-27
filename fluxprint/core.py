@@ -12,7 +12,7 @@ from scipy import signal as sg
 
 # local modules (deliberately light: the geo/plotting stack loads lazily via
 # `utils`/`io` function-level imports, so `import fluxprint` stays cheap)
-from .footprint import Footprint, FootprintSeries
+from .footprint import Footprint, FootprintSeries, smooth_field
 from .model import get_model
 from . import io
 from . import exceptions
@@ -464,11 +464,7 @@ def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
 
     # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
     if smooth_data:
-        skernel = np.array([[0.05, 0.1, 0.05],
-                            [0.10, 0.4, 0.10],
-                            [0.05, 0.1, 0.05]])
-        fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
-        fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
+        fclim_clim = smooth_field(fclim_clim)
     return fclim_clim
 
 

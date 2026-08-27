@@ -10,7 +10,6 @@ import xarray as xr
 from pyproj import Transformer  # for coordinate transformations
 import rasterio
 import matplotlib.pyplot as plt
-from scipy import signal as sg
 
 # local modules
 from .commons import update_nested_dict
@@ -74,15 +73,6 @@ def convert_to_object(data, name=None):
             'y_2d': y
         }
         return type('var_', (object,), footprint)
-
-        # Convert rasterio DatasetReader to dictionary
-        footprint = {'fclim_2d': data.read()[0]}
-        x = np.linspace(data.bounds[0], data.bounds[2],
-                        footprint['fclim_2d'].shape[0])
-        y = np.linspace(data.bounds[1], data.bounds[3],
-                        footprint['fclim_2d'].shape[1])
-        footprint["x_2d"], footprint["y_2d"] = np.meshgrid(x, y)
-        return {name: footprint}
     else:
         raise ValueError(
             "Data must be a netcdf (xr array) or a rasterio Dataset.")
@@ -167,18 +157,12 @@ def convert_to_tif(data, anchor='top-left', **attrs):
         raise TypeError(
             "Data must be an xarray Dataset, a rasterio dataset, or a footprint "
             f"object with an `fclim_2d` attribute; got {type(data).__name__}.")
-    return
 
 
 # utils.py
 def is_footprint_dict(d):
     return ('fclim_2d' in d) or (len(d.keys()) and 'fclim_2d' in d[list(d.keys())[0]])
 
-
-def find_utm_epsg_from_lon_deprecated(lon: float, lat: float = None):
-    utm_band = str(int(np.floor((lon + 180) / 6) % 60))
-    epsg_code = "EPSG:327" + utm_band.zfill(2)
-    return epsg_code
 
 def find_peak(array):
     return np.unravel_index(array.argmax(), array.shape)

@@ -8,7 +8,6 @@ from datetime import datetime
 # 3rd party modules
 import numpy as np
 import pandas as pd
-from scipy import signal as sg
 
 # local modules (deliberately light: the geo/plotting stack loads lazily via
 # `utils`/`io` function-level imports, so `import fluxprint` stays cheap)
@@ -92,16 +91,11 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     aka_keys = ALIASES["model_inputs"]
     core_keys = ['zm', 'wind_dir']
     optional_keys = ['z0', 'umean'] + keep_cols
-    # optional_keys = [] + keep_cols
-
 
     # If data is provided, extract values from the DataFrame
     if data is not None and isinstance(data, pd.DataFrame):
         # Drop full nan columns
         data = data.dropna(axis=1, how='all')
-
-        if not isinstance(data, pd.DataFrame):
-            raise ValueError("`data` must be a pandas DataFrame.")
 
         # Use regex to match column names case-insensitively
         inputs = {}

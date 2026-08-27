@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 
 
-from ..exceptions import *
+from ..exceptions import InputValidationError, exceptions, raise_ffp_exception
 from ..footprint import Footprint
 from ..grid import GridContext, resolve_grid
 from . import engine

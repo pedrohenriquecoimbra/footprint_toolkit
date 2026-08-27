@@ -123,3 +123,33 @@ def test_captured_fraction_is_live_total():
     assert fp.captured_fraction == fp.total()
     assert 0.9 < fp.captured_fraction <= 1.0
     assert fp.normalized().captured_fraction == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------- #
+# ALIASES                                                                     #
+# --------------------------------------------------------------------------- #
+def test_aliases_exported_at_top_level():
+    import fluxprint
+    assert fluxprint.ALIASES is fluxprint.core.ALIASES
+    assert "ALIASES" in fluxprint.__all__
+    assert fluxprint.ALIASES["model_inputs"]["ustar"] == ("u*",)
+    assert "blh" in fluxprint.ALIASES["model_inputs"]["pblh"]
+    assert fluxprint.ALIASES["drivers"]["H"] == ("H", "H_F")
+
+
+def test_aliases_drive_column_resolution():
+    import pandas as pd
+
+    from fluxprint.core import process_footprint_inputs
+
+    df = pd.DataFrame({
+        "zm": [20.0], "z0": [0.1], "u*": [0.4], "blh": [900.0],
+        "OL": [-50.0], "sigma_v": [0.4], "WD": [180.0],
+    })
+    inputs = process_footprint_inputs(data=df,
+                                      estimate_missing_variables=False)
+    assert inputs["ustar"] == [0.4]
+    assert inputs["pblh"] == [900.0]
+    assert inputs["mo_length"] == [-50.0]
+    assert inputs["v_sigma"] == [0.4]
+    assert inputs["wind_dir"] == [180.0]

@@ -21,6 +21,38 @@ from . import micrometeorology
 logger = logging.getLogger('fluxprint.core')
 
 
+#: Alternative column names recognized by :func:`process_footprint_inputs`,
+#: keyed by canonical name. ``"model_inputs"`` are the met variables forwarded
+#: to the models; ``"drivers"`` are consumed only by the estimators (e.g. the
+#: Obukhov length from USTAR/H/TA/PA) and each entry lists every accepted
+#: spelling including the canonical one. Matching is case-insensitive except
+#: for ``'H'`` (sensible heat flux): FFP names the boundary-layer height with
+#: a lowercase ``'h'``, so ``'H'`` must match exactly.
+ALIASES = {
+    "model_inputs": {
+        "wind_dir": ("wd", "wind_direction"),
+        "v_sigma": ("sigmav", "v_sd", "sigma_v"),
+        "ustar": ("u*",),
+        "umean": ("ws", "ws_f", "wind_speed"),
+        "mo_length": ("ol", "l"),
+        "pblh": ("blh",),
+    },
+    "drivers": {
+        "H": ("H", "H_F"),
+        "TA": ("TA", "TA_F"),
+        "PA": ("PA", "PA_F"),
+        # Height metadata for zm = z - d (aerodynamic height).
+        "measurement_height": ("measurement_height", "sensor_height",
+                               "instrument_height"),
+        "canopy_height": ("canopy_height", "vegetation_height", "hc"),
+        "displacement": ("displacement", "displacement_height", "zd"),
+    },
+}
+
+#: Driver keys matched case-sensitively (see :data:`ALIASES`).
+_CASE_SENSITIVE_DRIVERS = frozenset({"H"})
+
+
 class _ProcessedInputs(dict):
     """Processed model inputs, with estimation metadata out-of-band.
 
@@ -57,12 +89,7 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     # Define the required keys
     required_keys = ['zm', 'z0', 'umean', 'ustar',
                      'pblh', 'mo_length', 'v_sigma', 'wind_dir'] + keep_cols
-    aka_keys = {'wind_dir': ['wd', 'wind_direction'],
-                'v_sigma': ['sigmav', 'v_sd', 'sigma_v'],
-                'ustar': ['u*'],
-                'umean': ['ws', 'ws_f', 'wind_speed'],
-                'mo_length': ['ol', 'l'],
-                'pblh': ['blh']}
+    aka_keys = ALIASES["model_inputs"]
     core_keys = ['zm', 'wind_dir']
     optional_keys = ['z0', 'umean'] + keep_cols
     # optional_keys = [] + keep_cols
@@ -117,18 +144,8 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # models. 'H' (sensible heat flux, W m-2) is matched case-sensitively
         # so a lowercase 'h' column (FFP's name for the boundary-layer height)
         # is never mistaken for it. TA is degC, PA is kPa.
-        for key, aliases, exact in (
-                ('H', ['H', 'H_F'], True),
-                ('TA', ['TA', 'TA_F'], False),
-                ('PA', ['PA', 'PA_F'], False),
-                # Height metadata for zm = z - d (aerodynamic height).
-                ('measurement_height',
-                 ['measurement_height', 'sensor_height', 'instrument_height'],
-                 False),
-                ('canopy_height',
-                 ['canopy_height', 'vegetation_height', 'hc'], False),
-                ('displacement',
-                 ['displacement', 'displacement_height', 'zd'], False)):
+        for key, aliases in ALIASES["drivers"].items():
+            exact = key in _CASE_SENSITIVE_DRIVERS
             # An explicit None kwarg means "not available": fall through to
             # the column scan instead of feeding None to the estimators.
             if kwargs.get(key) is not None:
@@ -536,6 +553,7 @@ def get_contour(footprint, dx, dy, rs, verbosity=0):
 
 
 __all__ = [
+    "ALIASES",
     "calculate_footprint",
     "empty_footprint",
     "process_footprint_inputs",

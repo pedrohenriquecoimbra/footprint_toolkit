@@ -1,256 +1,130 @@
-"""Hsieh et al. (2000) footprint model -- EXPERIMENTAL, WORK IN PROGRESS.
+"""Hsieh et al. (2000) analytical footprint model.
 
-This draft port is deliberately NOT registered as a fluxprint model: its
-climatology rotation is known to be wrong (see the inline note below), its
-output is a per-pixel fraction rather than the m**-2 density the Footprint
-contract requires, and it has no input validation or tests. Do not use it for
-science yet; it ships only as a starting point for completing the port.
+Registered as ``"hsieh2000"``: the crosswind-integrated footprint of Hsieh,
+Katul & Chi (2000, Adv. Water Resour. 23, 765-772), expanded to two
+dimensions with the Gaussian crosswind dispersion of Detto et al. (2006,
+Water Resour. Res. 42, W08419, Appendix B).
 
-Reference: Hsieh, C.-I., G. Katul, T. Chi (2000): An approximate analytical
-model for footprint estimation of scalar fluxes in thermally stratified
-atmospheric flows. Adv. Water Resour. 23, 765-772.
+The model is fully analytic, so the kernel evaluates the wind-aligned
+footprint directly at the wind-frame coordinates of the fixed output grid
+(:func:`fluxprint.grid.to_wind_frame`) — the grid never rotates, and the
+returned field is a density in m**-2 whose full integral is one (the
+:class:`~fluxprint.footprint.Footprint` contract). Everything except the
+equations below (the grid, the record loop, validation plumbing, smoothing,
+provenance) comes from the generic driver via
+:func:`~fluxprint.model.engine.footprint_model`.
+
+Differences from the pre-0.4 experimental draft (which was never registered):
+the draft rotated the *grid* into the wind (producing an irregular grid) with
+a math-angle rotation instead of the meteorological azimuth, interpolated
+from a native grid, and returned per-pixel fractions instead of a density.
+All three are corrected here; the physics equations are unchanged.
+
+Inputs follow the canonical model signature. ``z0`` is required (the model
+has no ``umean`` mode — records without ``z0`` are rejected), and ``pblh``
+participates only in input validation (``zm > pblh`` is rejected), not in
+the footprint equations.
 """
 import numpy as np
-from scipy.stats import norm
-from scipy.special import gamma
-from scipy.interpolate import griddata
-from scipy import signal as sg
 
-def rotate_to_wind(x, y, wind_dir):
-    """Rotate coordinates to align with wind direction."""
-    theta = np.radians(wind_dir)
-    x_rot = x * np.cos(theta) + y * np.sin(theta)
-    y_rot = -x * np.sin(theta) + y * np.cos(theta)
-    return x_rot, y_rot
+from ..grid import to_wind_frame
+from .engine import ffp_validate, footprint_model
 
-def patch_index(patch_map):
-    """Get unique indices from patch map."""
-    return np.unique(patch_map[~np.isnan(patch_map)])
+__all__ = ["calc", "peak_distance"]
 
+#: von Karman constant (as in the reference implementations).
+_K = 0.4
 
-def patch_ffp(ffp, PatchMap=None, path_max_limit=20):
-    # Calculate patch sums if patch map provided
-    # Probably not a land cover map if too many classes
-    PI = patch_index(PatchMap)
-    ffp_patch = {}
-    if len(PI) < path_max_limit:
-        for i in range(len(PI)):
-            if ffp is not None:
-                ffp_patch[PI[i]] = np.nansum(
-                    ffp * (PatchMap == PI[i]))
-    return ffp_patch
-                    
-
-def domain_to_2d(domain=None, dx=None, dy=None, nx=None, ny=None):
-    if all(item is None for item in [dx, nx, domain]):
-        # If nothing is passed, default domain is a square of 2 Km size centered
-        # at the tower with pizel size of 2 meters (hence a 1000x1000 grid)
-        domain = [-1000., 1000., -1000., 1000.]
-        dx = dy = 2.
-        nx = ny = 1000
-    elif domain is not None:
-        # If domain is passed, it takes the precendence over anything else
-        if dx is not None:
-            # If dx/dy is passed, takes precendence over nx/ny
-            nx = int((domain[1]-domain[0]) / dx)
-            ny = int((domain[3]-domain[2]) / dy)
-        else:
-            # If dx/dy is not passed, use nx/ny (set to 1000 if not passed)
-            if nx is None:
-                nx = ny = 1000
-            # If dx/dy is not passed, use nx/ny
-            dx = (domain[1]-domain[0]) / float(nx)
-            dy = (domain[3]-domain[2]) / float(ny)
-    elif dx is not None and nx is not None:
-        # If domain is not passed but dx/dy and nx/ny are, define domain
-        domain = [-nx*dx/2, nx*dx/2, -ny*dy/2, ny*dy/2]
-    elif dx is not None:
-        # If domain is not passed but dx/dy is, define domain and nx/ny
-        domain = [-1000, 1000, -1000, 1000]
-        nx = int((domain[1]-domain[0]) / dx)
-        ny = int((domain[3]-domain[2]) / dy)
-    elif nx is not None:
-        # If domain and dx/dy are not passed but nx/ny is, define domain and dx/dy
-        domain = [-1000, 1000, -1000, 1000]
-        dx = (domain[1]-domain[0]) / float(nx)
-        dy = (domain[3]-domain[2]) / float(nx)
-
-    # Put domain into more convenient vars
-    xmin, xmax, ymin, ymax = domain
-
-    # ===========================================================================
-    # Define physical domain in cartesian and polar coordinates
-    # Cartesian coordinates
-    x = np.linspace(xmin, xmax, nx + 1)
-    y = np.linspace(ymin, ymax, ny + 1)
-    x_2d, y_2d = np.meshgrid(x, y)
-    return x_2d, y_2d
+#: Similarity coefficients (D, P) by stability class (Hsieh 2000, Table 2 /
+#: Eq 17): unstable, near neutral, stable — classified on zu/L with the
+#: paper's 0.04 threshold.
+_STABILITY = {
+    "unstable": (0.28, 0.59),
+    "neutral": (0.97, 1.0),
+    "stable": (2.44, 1.33),
+}
+_STAB_THRESHOLD = 0.04
 
 
-def calc_ffp_climatology(ustar, mo_length, v_sigma, z0, zm, wind_dir, smooth_data=0, **kwargs):
-    clim_ffp = type('var_', (object,), {'x_2d': [], 'y_2d': [], 'fclim_2d': 0,
-                                        'dist_max': [],
-                                        'n': 0, 'flag_err': []})
-    for us_, l_, vs_, z0_, zm_, wd_ in list(zip(ustar, mo_length, v_sigma, z0, zm, wind_dir)):
-        this_ffp = calc_ffp(us_, l_, vs_, z0_, zm_, wd_, **kwargs)
-        # NOT RIGHT, CONFIRM X_2D AND Y_2D AND FCLIM_2D ROTATION 
-        clim_ffp.x_2d = this_ffp.x_2d
-        clim_ffp.y_2d = this_ffp.y_2d
-        clim_ffp.fclim_2d += this_ffp.fclim_2d
-        clim_ffp.dist_max += [this_ffp.dist_max]
-        clim_ffp.n += 1
-        clim_ffp.flag_err += [this_ffp.flag_err]
-    
-    if clim_ffp.n > 0:
-        # Normalize and smooth footprint climatology
-        clim_ffp.fclim_2d = clim_ffp.fclim_2d / clim_ffp.n
+def _hsieh_params(zm, z0, mo_length):
+    """``(zu, D, P, A)`` for one record.
 
-        # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
-        if smooth_data:
-            skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
-            clim_ffp.fclim_2d = sg.convolve2d(
-                clim_ffp.fclim_2d, skernel, mode='same')
-            clim_ffp.fclim_2d = sg.convolve2d(
-                clim_ffp.fclim_2d, skernel, mode='same')
-    return clim_ffp
-    
-def calc_ffp(ustar, mo_length, v_sigma, z0, zm, wind_dir, domain=None, dx=None, dy=None, nx=None, ny=None,
-             mscale=0, contour_marks=None, Tdist=0, 
-             Twindir=0, ubar=0, pblh=0, **kwargs):
+    ``zu`` is the height scale of Hsieh Eq 13.5; ``A = D zu**P |L|**(1-P) /
+    k**2`` is the along-wind length scale that carries the whole
+    crosswind-integrated footprint: ``f_ci(x) = (A / x**2) exp(-A / x)``,
+    cumulative ``F(x) = exp(-A / x)``, peak at ``A / 2`` (Eq 19).
     """
-    Calculate footprint using Hsieh et al. (2000) model.
-    
-    Parameters:
-        ustar: friction velocity [m/s]
-        mo_length: Obukhov stability length [m]
-        v_sigma: fluctuation of lateral wind [m/s] (approx. 2 times ustar)
-        z0: momentum roughness length [m]
-        zm: height of the measurement [m]
-        d: displacement height [m]
-        wind_dir: wind direction, from north, degrees (wind coming FROM)
-        FX, FY: meshgrid coordinates of mask map
-        mscale: 0 for linear scaling, 1 for exponential
-    """
-    ustar = np.array(ustar)
-    mo_length = np.array(mo_length)
-    v_sigma = np.array(v_sigma)
-    wind_dir = np.array(wind_dir)
-    z0 = np.array(z0)
-    zm = np.array(zm)
-
-    # Overall Parameters
-    # zm = zH - d  # Effective height
-    Lx = 100 * zm  # Initial length of along-wind footprint
-    k = 0.4  # von Karman constant
-    zL = zm / mo_length  # Stability coefficient
-
-    # # Rotate target point
-    # Txmax, Tymax = rotate_to_wind(Tdist, 0, Twindir)
-    
-    # Prepare coordinate systems
-    x_2d, y_2d = domain_to_2d(domain, dx, dy, nx, ny)
-
-    Fxprime, Fyprime = rotate_to_wind(x_2d, y_2d, wind_dir)
-    # Rl = len(FY)
-
-    # Lateral dispersion width
-    ywidth0 = np.floor(z0 * (0.3 * (v_sigma/ustar) * (Lx/z0)**0.86) / 1.5)
-    ywidth = ywidth0 * 3
-    
-    # Hsieh model parameters
-    zu = zm * (np.log(zm/z0) - 1 + z0/zm)  # New height scale, Eq 13.5 Hsieh (2000)
-    
-    # Coefficients D and P according to stability
-    P = [0.59, 1, 1.33]
-    D = [0.28, 0.97, 2.44]
-    
+    zu = zm * (np.log(zm / z0) - 1 + z0 / zm)
     stab = zu / mo_length
-    thresh = 0.04
-    
-    if stab < -thresh:
-        ii = 0
-    elif abs(stab) < thresh:
-        ii = 1
-    elif stab > thresh:
-        ii = 2
-    
-    D1 = D[ii]
-    P1 = P[ii]
-    
-    F2H = (D1 / (0.105 * k**2)) * (zm**-1 * abs(mo_length)**(1-P1) * zu**P1)  # Eq 20, Hsieh
-    Xm = np.ceil(F2H * zm)
-
-    # # Initialize all models to None
-    # footHsieh = None
-
-    # # Calculate pixel values at target point
-    # pxR = {}
-    # closestIndexX = np.argmin(np.abs(FX2[0, :] - Txmax))
-    # closestIndexY = np.argmin(np.abs(FY2[::-1, 0] - Tymax))
-
-    # if footHsieh is not None:
-    #     pxR['H'] = footHsieh[closestIndexY, closestIndexX]
-
-    flag_err = 0
-
-    if mscale == 0:  # linear
-        bin_size = max(1, np.round(F2H * zm / 500, 0))
-        x = np.arange(0.001, Xm + bin_size, bin_size)  # Avoid eps
-    elif mscale == 1:  # exponential
-        bin_size = 0.1
-        x = np.exp(np.arange(0, np.log(Xm * 1.1) + bin_size))
-
-    # Cross-wind integrated footprint (Eq 17 Hsieh)
-    T2 = (-1 / k**2) * (D1 * zu**P1 * abs(mo_length)**(1-P1)) / x
-    Fp = -(T2 / x) * np.exp(T2)
-    
-    # 2D expansion (Detto 2006)
-    nn = len(x)
-    sy = z0 * 0.3 * (v_sigma/ustar) * (x/z0)**0.86  # Eq B4 Detto
-    
-    if mscale == 0:  # linear
-        y = np.arange(-ywidth, ywidth + bin_size, bin_size)
-    elif mscale == 1:  # exponential
-        y_pos = np.exp(np.arange(0, np.log(ywidth) + bin_size))
-        y = np.concatenate([-np.flip(y_pos), [0], y_pos])
-    
-    # Create footprint matrix
-    footo = np.zeros((nn, len(y)))
-    for i in range(nn):
-        footo[i,:] = Fp[i] * norm.pdf(y, 0, sy[i])
-    
-    # Unrotated footprint
-    foot = footo.T
-
-    xx, yy = np.meshgrid(x, y)
-
-    if not np.all(y == 0):
-        foot_rotate = griddata((xx.flatten(), yy.flatten()), foot.flatten(),
-                                (Fxprime.flatten(), Fyprime.flatten()), 
-                                method='linear')
-        foot_rotate = foot_rotate.reshape(x_2d.shape)
-        
-        if mscale == 0:
-            dx = x[1] - x[0]
-            dy = y[1] - y[0]
-            binnorm = (np.nansum(foot) * dx * dy) / np.nansum(foot_rotate)
-        elif mscale == 1:
-            dx = np.concatenate([[x[0]], np.diff(x)])
-            dy = np.concatenate([[abs(y[1]-y[0])], np.diff(y)])
-            dxx, dyy = np.meshgrid(dx, dy)
-            DD = foot * dxx * dyy
-            binnorm = np.nansum(DD) / np.nansum(foot_rotate)
-        
-        ffp_2d = foot_rotate * binnorm
-        
-        # Distance of maximum contribution (Eq 19 Hsieh)
-        HXmax = D1 * zu**P1 * abs(mo_length)**(1-P1) / (2 * 0.4**2)
-        Hxmax, Hymax = rotate_to_wind(HXmax, 0, wind_dir)
+    if stab < -_STAB_THRESHOLD:
+        D, P = _STABILITY["unstable"]
+    elif stab <= _STAB_THRESHOLD:
+        D, P = _STABILITY["neutral"]
     else:
-        ffp_2d = np.zeros((1,1)) * np.nan
-        HXmax = np.nan
-        flag_err = 1
-    
-    return type('var_', (object,), {'x_2d': Fxprime, 'y_2d': Fyprime, 'fclim_2d': ffp_2d.T,
-                                    'dist_max': HXmax,
-                                    'n': 1, 'flag_err': flag_err})
+        D, P = _STABILITY["stable"]
+    A = D * zu**P * abs(mo_length) ** (1 - P) / _K**2
+    return zu, D, P, A
+
+
+def peak_distance(*, zm, z0, mo_length):
+    """Upwind distance of the footprint maximum [m] (Hsieh 2000, Eq 19).
+
+    The most common single number asked of a footprint model — the fetch of
+    peak contribution — available without computing a field.
+    """
+    return _hsieh_params(zm, z0, mo_length)[3] / 2.0
+
+
+def _hsieh_validate(rec, opts, verbosity, *, quiet=False):
+    """Hsieh requires ``z0`` (no ``umean`` mode), plus the standard checks."""
+    if rec.z0 is None:
+        return False
+    return ffp_validate(rec, opts, verbosity, quiet=quiet)
+
+
+def _hsieh_record(ctx, rec, opts):
+    """Per-record Hsieh/Detto footprint density on the fixed grid.
+
+    ``f(x_along, x_cross) = f_ci(x_along) * N(x_cross; sigma_y(x_along))``
+    with ``f_ci`` from Hsieh Eq 17 and ``sigma_y = 0.3 z0 (sigma_v / ustar)
+    (x / z0)**0.86`` from Detto Eq B4, evaluated at the wind-frame
+    coordinates of the output grid (along-wind positive toward the wind
+    source, i.e. the fetch).
+    """
+    _zu, _D, _P, A = _hsieh_params(rec.zm, rec.z0, rec.mo_length)
+
+    along, cross = to_wind_frame(ctx.x_2d, ctx.y_2d, rec.wind_dir)
+    f_2d = np.zeros(ctx.x_2d.shape)
+    px = along > 0
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        t = A / along[px]
+        f_ci = (t / along[px]) * np.exp(-t)
+        sy = 0.3 * rec.z0 * (rec.v_sigma / rec.ustar) \
+            * (along[px] / rec.z0) ** 0.86
+        f_2d[px] = (f_ci / (np.sqrt(2 * np.pi) * sy)
+                    * np.exp(-cross[px] ** 2 / (2 * sy**2)))
+    # Numerical underflow at the near-field limit (x -> 0+: f -> 0, but the
+    # intermediate terms can overflow) must land at the analytic limit, 0.
+    f_2d[~np.isfinite(f_2d)] = 0.0
+    return f_2d, 0, 1
+
+
+#: Provenance stamped into every footprint this model produces.
+HSIEH_META = {
+    "model_citation": ("Hsieh, C.-I., G. Katul, T. Chi (2000): An "
+                       "approximate analytical model for footprint "
+                       "estimation of scalar fluxes in thermally stratified "
+                       "atmospheric flows. Adv. Water Resour. 23, 765-772."),
+    "model_doi": "10.1016/S0309-1708(99)00042-1",
+    "lateral_citation": ("Detto, M., N. Montaldo, J.D. Albertson, M. "
+                         "Mancini, G. Katul (2006), Water Resour. Res. 42, "
+                         "W08419, Appendix B (crosswind dispersion)."),
+}
+
+calc = footprint_model(
+    "hsieh2000",
+    description=("Hsieh et al. (2000) analytical footprint with "
+                 "Detto et al. (2006) crosswind expansion"),
+    meta=HSIEH_META,
+    validate=_hsieh_validate,
+)(_hsieh_record)

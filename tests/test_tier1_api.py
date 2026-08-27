@@ -270,7 +270,7 @@ def test_calc_footprint_1d_rejects_invalid_and_nan_inputs():
 # Model registry cleanup                                                      #
 # --------------------------------------------------------------------------- #
 def test_registry_exposes_exactly_the_working_models():
-    assert available_models() == ["kljun2015"]
+    assert available_models() == ["hsieh2000", "kljun2015"]
 
 
 def test_kormann_meixner_stub_is_gone():

@@ -10,6 +10,8 @@ Adding a model? Register a reference oracle in ``REFERENCE_ORACLES`` below —
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -49,10 +51,42 @@ def _kljun2015_reference(**met):
     return np.asarray(out["fclim_2d"]), int(out["n"])
 
 
+_HSIEH_SNAPSHOT = Path(__file__).parent / "data" / "hsieh2000_reference.npz"
+
+
+def _hsieh2000_reference(**met):
+    """Golden-snapshot oracle for the Hsieh port (a regression pin).
+
+    There is no vendored original for this model; the snapshot was generated
+    by ``tests/data/regenerate_hsieh_reference.py`` at registration time and
+    pins the field thereafter. The tie to the published equations lives in
+    ``tests/test_hsieh_reference.py`` (analytic invariants).
+    """
+    case = next(name for name, kwargs in CASES.items() if kwargs == met)
+    with np.load(_HSIEH_SNAPSHOT) as data:
+        return data[f"{case}_f"], int(data[f"{case}_n"])
+
+
 #: model name -> oracle returning ``(field, n)`` for the canonical kwargs.
 #: EVERY registered model must have an entry; the guard test enforces it.
 REFERENCE_ORACLES = {
     "kljun2015": _kljun2015_reference,
+    "hsieh2000": _hsieh2000_reference,
+}
+
+#: Canonical cases a model legitimately cannot run (skipped, not failed).
+UNSUPPORTED_CASES = {
+    "hsieh2000": {"unstable-umean"},  # Hsieh has no umean mode (z0 required)
+}
+
+#: Comparison tolerance per oracle. 0.0 = bitwise (the Kljun oracle runs the
+#: vendored reference in the same process, so exact equality is well
+#: defined). The Hsieh oracle is a snapshot generated on one platform;
+#: libm/numpy exp/pow may differ by a few ulps elsewhere, so it gets a
+#: tolerance far below any physical change but above ulp noise.
+ORACLE_RTOL = {
+    "kljun2015": 0.0,
+    "hsieh2000": 1e-12,
 }
 
 
@@ -72,13 +106,52 @@ def test_registered_model_matches_reference_exactly(name, case):
     """The registered model's field is bitwise identical to its reference."""
     if name not in available_models():
         pytest.skip(f"{name} not registered in this build")
+    if case in UNSUPPORTED_CASES.get(name, ()):
+        pytest.skip(f"{name} does not support the {case} input mode")
     met = CASES[case]
     fp = get_model(name)(**{k: v for k, v in met.items()}, **GRID)
     expected, n = REFERENCE_ORACLES[name](**met)
     assert fp.n == n, f"{name}/{case}: composited record count differs"
-    assert np.array_equal(fp.f, expected), (
-        f"{name}/{case}: field differs from the reference implementation "
+    assert fp.f.dtype == expected.dtype, (
+        f"{name}/{case}: field dtype differs from the reference")
+    rtol = ORACLE_RTOL[name]
+    matches = (np.array_equal(fp.f, expected) if rtol == 0.0
+               else np.allclose(fp.f, expected, rtol=rtol, atol=0.0))
+    assert matches, (
+        f"{name}/{case}: field differs from the reference "
         f"(max abs diff {np.nanmax(np.abs(fp.f - expected)):.3e})")
+
+
+#: Grid-spec variants covering every branch of the domain/dx/dy/nx/ny
+#: resolution logic. The CASES battery above pins only the domain+dx+dy
+#: branch; any hoist of the grid code must keep all branches bitwise
+#: identical, axes included.
+GRID_VARIANTS = {
+    "default": {},
+    "nx-only": dict(nx=100),
+    "dx-only": dict(dx=20.0),
+    "domain-nx": dict(domain=[-200.0, 200.0, -200.0, 200.0], nx=150),
+    "dx-nx": dict(dx=15.0, nx=80),
+}
+
+
+@pytest.mark.parametrize("variant", sorted(GRID_VARIANTS))
+def test_registered_kljun_matches_reference_across_grid_specs(variant):
+    """Every grid-resolution branch stays bitwise identical to the reference."""
+    grid = GRID_VARIANTS[variant]
+    met = CASES["unstable-z0"]
+    fp = get_model("kljun2015")(**met, **grid)
+    out = reference.FFP_climatology(
+        zm=met["zm"], z0=met.get("z0"), umean=met.get("umean"),
+        ustar=met["ustar"], h=met["pblh"], ol=met["mo_length"],
+        sigmav=met["v_sigma"], wind_dir=met["wind_dir"],
+        rs=None, verbosity=0, fig=False, **grid)
+    expected = np.asarray(out["fclim_2d"])
+    assert fp.f.dtype == expected.dtype
+    assert fp.f.shape == expected.shape
+    assert np.array_equal(fp.f, expected)
+    assert np.array_equal(fp.x, np.asarray(out["x_2d"])[0, :])
+    assert np.array_equal(fp.y, np.asarray(out["y_2d"])[:, 0])
 
 
 def test_port_matches_reference_direct_call():

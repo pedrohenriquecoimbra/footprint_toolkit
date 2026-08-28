@@ -110,50 +110,55 @@ def _is_finite_number(value):
             and bool(np.isfinite(value)))
 
 
-def check_ffp_inputs(ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer, verbosity):
+def check_ffp_inputs(ustar, sigmav, h, ol, wind_dir, zm, z0, umean, rslayer,
+                     verbosity, *, quiet=False):
     # Check passed values for physical plausibility and consistency.
+    # quiet=True skips the per-failure reporting (raise_ffp_exception logs one
+    # record per rejected input, which the mapped/dask path must not do per
+    # record); the checks themselves are identical.
+    report = (lambda code, verbosity: None) if quiet else raise_ffp_exception
     # Reject missing/non-finite records first: every comparison below is False
     # for NaN, so without this guard a NaN record would sail through validation
     # and silently poison the composited footprint.
     required = [ustar, sigmav, h, ol, wind_dir, zm,
                 umean if z0 is None else z0]
     if not all(_is_finite_number(val) for val in required):
-        raise_ffp_exception(21, verbosity)
+        report(21, verbosity)
         return False
     if zm <= 0.:
-        raise_ffp_exception(2, verbosity)
+        report(2, verbosity)
         return False
     if z0 is not None and umean is None and z0 <= 0.:
-        raise_ffp_exception(3, verbosity)
+        report(3, verbosity)
         return False
     if h <= 10.:
-        raise_ffp_exception(4, verbosity)
+        report(4, verbosity)
         return False
     if zm > h :
-        raise_ffp_exception(5, verbosity)
+        report(5, verbosity)
         return False
     if z0 is not None and umean is None and zm <= 12.5 * z0:
         if rslayer == 1:
-            raise_ffp_exception(6, verbosity)
+            report(6, verbosity)
         else:
-            raise_ffp_exception(20, verbosity)
+            report(20, verbosity)
             return False
     # ol == 0 is unphysical and would raise ZeroDivisionError; treat it like the
     # too-unstable case (zm/ol <= -15.5) and reject the record.
     if ol == 0 or float(zm) / ol <= -15.5:
-        raise_ffp_exception(7, verbosity)
+        report(7, verbosity)
         return False
     if sigmav <= 0:
-        raise_ffp_exception(8, verbosity)
+        report(8, verbosity)
         return False
     if ustar <= 0.1:
-        raise_ffp_exception(9, verbosity)
+        report(9, verbosity)
         return False
     if wind_dir > 360:
-        raise_ffp_exception(10, verbosity)
+        report(10, verbosity)
         return False
     if wind_dir < 0:
-        raise_ffp_exception(10, verbosity)
+        report(10, verbosity)
         return False
     return True
 

@@ -225,12 +225,162 @@ def test_series_basics():
     assert s[1].time == datetime(2024, 4, 24, 1)
 
 
+def test_series_slicing_returns_a_series():
+    s = _series(3)
+    sub = s[1:3]
+    assert isinstance(sub, FootprintSeries)
+    assert sub.nt == 2
+    assert sub.aggregate(smooth=False).is_climatology
+    assert isinstance(s[0], Footprint)     # integer indexing unchanged
+    with pytest.raises(ValueError, match="selects no members"):
+        s[3:]
+
+
+def test_series_append_validates_grid_and_frame():
+    s = _series(2)
+    s.append(s[0].replace(time=datetime(2024, 4, 24, 5)))
+    assert s.nt == 3
+    with pytest.raises(ValueError, match="same grid"):
+        s.append(Footprint.from_grid(np.zeros((3, 3)), dx=10.0))
+    with pytest.raises(ValueError, match="same crs"):
+        s.append(s[0].replace(crs="EPSG:3035"))
+
+
+def test_series_repr_is_informative():
+    assert "nt=2" in repr(_series(2))
+    assert "local" in repr(_series(2))
+
+
+def test_replace_is_public_and_copies_attrs():
+    fp = _toy()
+    fp.attrs["note"] = "original"
+    copy = fp.replace(time=5.0)
+    copy.attrs["note"] = "changed"
+    assert fp.attrs["note"] == "original"  # attrs copied
+    assert copy.time == 5.0
+    assert copy.f is fp.f                  # arrays shared by contract
+
+
+def test_descending_axes_rejected():
+    with pytest.raises(ValueError, match="ascending"):
+        Footprint(f=np.zeros((1, 3)), x=np.array([2.0, 1.0, 0.0]),
+                  y=np.array([0.0]))
+    with pytest.raises(ValueError, match="ascending"):
+        Footprint(f=np.zeros((3, 1)), x=np.array([0.0]),
+                  y=np.array([2.0, 1.0, 0.0]))
+
+
+def test_empty_field_rejected():
+    with pytest.raises(ValueError, match="empty"):
+        Footprint(f=np.zeros((0, 0)), x=np.array([]), y=np.array([]))
+
+
+def test_attrs_shadowing_frame_keys_warn_and_do_not_serialize():
+    pytest.importorskip("xarray")
+    fp = _toy()
+    fp.attrs["crs"] = "just a note"
+    with pytest.warns(UserWarning, match="shadow reserved frame"):
+        ds = fp.to_xarray()
+    assert "crs" not in ds.attrs           # local frame: no crs key at all
+    back = Footprint.from_xarray(ds)
+    assert back.crs is None                # the note never became the frame
+
+
+def test_frame_attrs_do_not_accumulate_across_round_trips():
+    pytest.importorskip("xarray")
+    pytest.importorskip("pyproj")
+    fp = _toy().georeference("EPSG:3035")
+    back = Footprint.from_xarray(fp.to_xarray())
+    assert "crs_wkt" not in back.attrs and "crs_proj4" not in back.attrs
+    back2 = Footprint.from_xarray(back.to_xarray())    # second trip is clean
+    assert back2.crs == fp.crs
+
+
 def test_series_aggregate_means_and_sums_counts():
     s = _series(3)                       # fields 0, 1, 2 -> mean 1.0
     clim = s.aggregate(smooth=False)
     assert np.allclose(clim.f, 1.0)
     assert clim.n == 1 + 2 + 3           # counts summed
     assert clim.is_climatology is True
+
+
+def test_series_aggregate_matches_nanmean_with_nan_members():
+    # The incremental accumulator must reproduce nanmean semantics: NaN
+    # holes ignored per cell, all-NaN cells staying NaN.
+    rng = np.random.default_rng(1)
+    fields = [rng.random((4, 4)) for _ in range(3)]
+    fields[0][0, 0] = np.nan               # a hole in one member
+    fields[1][:] = np.nan                  # an all-NaN slot (on_error="nan")
+    fps = [Footprint.from_grid(f, dx=10.0, time=float(i))
+           for i, f in enumerate(fields)]
+    s = FootprintSeries(fps)
+    expected = np.nanmean(np.stack(fields), axis=0)
+    got = s.aggregate(smooth=False).f
+    assert np.array_equal(np.isnan(got), np.isnan(expected))
+    assert np.allclose(got[np.isfinite(got)], expected[np.isfinite(expected)],
+                       rtol=1e-12)
+
+
+def test_series_aggregate_all_nan_cell_stays_nan():
+    fps = [Footprint.from_grid(np.full((2, 2), np.nan), dx=10.0, time=float(i))
+           for i in range(2)]
+    clim = FootprintSeries(fps).aggregate(smooth=False)
+    assert np.isnan(clim.f).all()
+
+
+def test_aggregate_stamps_smoothed_and_drops_member_smoothing_attrs():
+    fps = [Footprint.from_grid(np.full((3, 3), float(i + 1)), dx=10.0,
+                               time=float(i), attrs={"smooth_data": 0})
+           for i in range(2)]
+    smoothed = FootprintSeries(fps).aggregate(smooth=True)
+    # The climatology IS smoothed: it must say so, and must not carry the
+    # members' smooth_data=0 (which describes them, not it).
+    assert smoothed.attrs.get("smoothed") == 1
+    assert "smooth_data" not in smoothed.attrs
+    unsmoothed = FootprintSeries(fps).aggregate(smooth=False)
+    assert "smoothed" not in unsmoothed.attrs
+    assert "smooth_data" not in unsmoothed.attrs
+
+
+def test_climatology_series_round_trips_time_none():
+    # Grouped climatologies (calculate_footprint(by=<categorical>)) have no
+    # per-member time labels; the index axis written for the NetCDF layout is
+    # marked structural and must NOT come back as fake relative labels.
+    xr = pytest.importorskip("xarray")
+    fps = [Footprint.from_grid(np.full((2, 2), float(i)), dx=10.0,
+                               attrs={"group": g})
+           for i, g in enumerate(["DJF", "JJA"])]
+    ds = FootprintSeries(fps).to_xarray()
+    assert ds["time"].attrs.get("fluxprint_time") == "index"
+    back = FootprintSeries.from_xarray(ds)
+    assert all(fp.time is None for fp in back)
+    assert all(fp.is_climatology for fp in back)
+
+
+def test_georeferenced_climatology_series_netcdf_round_trip(tmp_path):
+    # Previously: the write succeeded and from_netcdf raised the frame
+    # invariant ("cannot carry a relative time label") — the library could
+    # not read the file it had just written.
+    pytest.importorskip("xarray")
+    fps = [Footprint.from_grid(np.full((2, 2), float(i)), dx=10.0,
+                               crs="EPSG:3035")
+           for i in range(2)]
+    path = tmp_path / "clim_series.nc"
+    FootprintSeries(fps).to_netcdf(str(path))
+    back = FootprintSeries.from_netcdf(str(path))
+    assert back.crs == "EPSG:3035"
+    assert all(fp.time is None for fp in back)
+
+
+def test_mixed_time_labels_warn_and_degrade_to_index():
+    pytest.importorskip("xarray")
+    a = Footprint.from_grid(np.zeros((2, 2)), dx=10.0,
+                            time=datetime(2024, 4, 24))
+    b = Footprint.from_grid(np.zeros((2, 2)), dx=10.0)  # no label
+    with pytest.warns(UserWarning, match="member index"):
+        ds = FootprintSeries([a, b]).to_xarray()
+    back = FootprintSeries.from_xarray(ds)
+    assert all(fp.time is None for fp in back)
 
 
 def test_series_georeference_all_members():

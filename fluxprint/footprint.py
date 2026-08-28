@@ -37,7 +37,41 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("fluxprint.footprint")
 
-__all__ = ["Footprint", "FootprintSeries", "laea_crs"]
+__all__ = ["Footprint", "FootprintSeries", "laea_crs", "smooth_field",
+           "FFP_SMOOTH_KERNEL"]
+
+#: The standard FFP 3x3 smoothing kernel (Kljun et al. 2015). One smoothing
+#: pass is one 2-D convolution with this kernel; the reference procedure
+#: applies it twice.
+FFP_SMOOTH_KERNEL = np.array([[0.05, 0.1, 0.05],
+                              [0.10, 0.4, 0.10],
+                              [0.05, 0.1, 0.05]])
+
+
+def smooth_field(f: np.ndarray, kernel: np.ndarray | None = None,
+                 passes: int = 2) -> np.ndarray:
+    """Smooth a 2-D footprint field with the standard FFP kernel.
+
+    This is the model-agnostic smoothing step of the reference FFP procedure:
+    ``passes`` 2-D convolutions (``mode="same"``) with the 3x3
+    :data:`FFP_SMOOTH_KERNEL`. It applies to any footprint field, not just
+    Kljun's. Requires ``scipy``.
+
+    Args:
+        f: 2-D field to smooth.
+        kernel: Alternative convolution kernel; defaults to
+            :data:`FFP_SMOOTH_KERNEL`.
+        passes: Number of convolution passes (the FFP reference uses 2).
+
+    Returns:
+        The smoothed field (a new array; ``f`` is not modified).
+    """
+    sg = _require("scipy.signal", "")  # scipy is a core dependency
+    kernel = FFP_SMOOTH_KERNEL if kernel is None else np.asarray(kernel)
+    out = np.asarray(f)
+    for _ in range(passes):
+        out = sg.convolve2d(out, kernel, mode="same")
+    return out
 
 
 def _require(module: str, extra: str) -> Any:
@@ -175,12 +209,28 @@ class Footprint:
 
         if self.f.ndim != 2:
             raise ValueError(f"f must be 2-D (ny, nx); got shape {self.f.shape}.")
+        if self.f.size == 0:
+            raise ValueError(
+                "f is empty (a zero-size grid); a footprint needs at least "
+                "one cell.")
         if self.f.shape != (self.y.size, self.x.size):
             raise ValueError(
                 f"f has shape {self.f.shape} but coordinates imply "
                 f"{(self.y.size, self.x.size)} (ny, nx).")
         if not (_is_regular(self.x) and _is_regular(self.y)):
             raise ValueError("x and y must be regularly spaced.")
+        # Ascending axes are part of the grid contract (x west-east, y
+        # south-north): descending coordinates would silently flip the sign
+        # of dx/dy and every cell-area-dependent quantity (total, coverage,
+        # contour levels). Geospatial rasters are typically north-first —
+        # flip before constructing.
+        for name, coord in (("x", self.x), ("y", self.y)):
+            if coord.size > 1 and coord[1] <= coord[0]:
+                raise ValueError(
+                    f"{name} must be ascending "
+                    f"({'west-east' if name == 'x' else 'south-north'}); "
+                    "for a north-first raster flip the field and coordinate "
+                    "first (f=f[::-1], y=y[::-1]).")
         if self.crs is not None and _is_relative_label(self.time):
             raise ValueError(
                 "a georeferenced footprint (crs set) cannot carry a relative "
@@ -248,6 +298,20 @@ class Footprint:
         iy, ix = np.unravel_index(np.nanargmax(self.f), self.f.shape)
         return float(self.x[ix]), float(self.y[iy])
 
+    @property
+    def captured_fraction(self) -> float:
+        """Fraction of the model footprint captured by this domain.
+
+        Registered models return a field whose *full* (infinite-domain)
+        footprint integrates to one, so the integral over the truncated
+        domain (:meth:`total`) is the fraction of the flux the domain
+        captures. This property is live — it reflects the current field
+        (e.g. it becomes 1.0 after :meth:`normalized`) — while the
+        ``attrs["captured_fraction"]`` a model stamps records the value at
+        creation time. For an arbitrary field this is simply the integral.
+        """
+        return float(self.total())
+
     def normalized(self) -> "Footprint":
         """Return a copy whose field integrates to one over the domain.
 
@@ -261,6 +325,131 @@ class Footprint:
                 "Cannot normalize a footprint whose integral is zero (empty "
                 "field, or a degenerate single-row/column grid).")
         return self._replace(f=self.f / scale)
+
+    def smoothed(self, kernel: np.ndarray | None = None,
+                 passes: int = 2) -> "Footprint":
+        """Return a copy smoothed with the standard FFP kernel.
+
+        Applies :func:`smooth_field` (``passes`` convolutions with the 3x3
+        :data:`FFP_SMOOTH_KERNEL`) to the field — the same smoothing the
+        reference FFP procedure applies to a climatology, usable with any
+        footprint model. The copy records ``attrs["smoothed"] = 1``.
+        """
+        out = self._replace(f=smooth_field(self.f, kernel=kernel,
+                                           passes=passes))
+        out.attrs["smoothed"] = 1
+        return out
+
+    def _cumulative_field(self) -> tuple[np.ndarray, np.ndarray]:
+        """Finite field values sorted descending, and their cumulative integral."""
+        cell = self.dx * self.dy
+        if cell == 0:
+            raise ValueError("Cannot contour a degenerate (zero cell area) grid.")
+        sf = np.sort(self.f, axis=None)[::-1]
+        sf = sf[np.isfinite(sf)]
+        csf = np.cumsum(sf) * cell
+        return sf, csf
+
+    @staticmethod
+    def _as_fraction(value: float) -> float:
+        """Normalize a fraction argument: values above 1 are percentages."""
+        value = float(value)
+        return value / 100.0 if value > 1 else value
+
+    def _locate_level(self, r: float, sf: np.ndarray, csf: np.ndarray, *,
+                      stacklevel: int) -> tuple[float, float] | None:
+        """``(level, enclosed fraction)`` nearest to ``r``.
+
+        Returns ``None`` — after warning at ``stacklevel`` — when ``r``
+        exceeds the fraction this domain captures. Shared by
+        :meth:`level_for` and :meth:`contours`, so there is exactly one
+        definition of the source-area search.
+        """
+        captured = float(csf[-1]) if csf.size else 0.0
+        if captured <= 0 or r > captured:
+            warnings.warn(
+                f"The {r:.0%} source area is unreachable: the domain "
+                f"captures only {captured:.0%} of the flux. Enlarge "
+                "`domain` to close this contour.", UserWarning,
+                stacklevel=stacklevel)
+            return None
+        idx = int(np.argmin(np.abs(csf - r)))
+        return float(sf[idx]), float(csf[idx])
+
+    def level_for(self, r: float) -> float:
+        """Field level whose enclosed integral is nearest to fraction ``r``.
+
+        The source-area level: cells with ``f >= level_for(r)`` together
+        integrate to ``r`` of the *full* model footprint (which integrates to
+        one), **not** ``r`` of the flux the domain happens to capture — the
+        two definitions differ on any truncated domain, so state which one
+        you mean when reporting source areas. Cheap (no contour extraction);
+        :meth:`contours` uses the same search.
+
+        Args:
+            r: Source-area fraction in ``(0, 0.9]``; values above 1 are read
+                as percentages (``80`` -> ``0.8``).
+
+        Returns:
+            The field level, or ``nan`` (with a warning) when ``r`` exceeds
+            the fraction this domain captures (:attr:`captured_fraction`).
+        """
+        r = self._as_fraction(r)
+        if not 0.0 < r <= 0.9:
+            raise ValueError(
+                f"Source-area fractions must be in (0, 0.9], got {r}; the "
+                "parameterisations are not defined beyond the 90% contour.")
+        located = self._locate_level(r, *self._cumulative_field(),
+                                     stacklevel=3)
+        return float("nan") if located is None else located[0]
+
+    def weighted_mean(self, field: np.ndarray, *,
+                      min_coverage: float | None = None) -> float:
+        """Footprint-weighted mean of a gridded quantity.
+
+        ``sum(f * field) / sum(f)`` over the cells where both the footprint
+        and ``field`` are finite — a true weighted mean, so a uniform field
+        comes back unchanged regardless of domain truncation or the
+        footprint's normalization (the renormalization integrators tend to
+        forget). NaN cells in ``field`` are excluded from both sums.
+
+        Args:
+            field: 2-D array on this footprint's grid (same shape as ``f``),
+                e.g. a land-cover fraction or remote-sensing raster band.
+            min_coverage: Minimum fraction of the *full* (unit-integral)
+                model footprint that must fall on finite ``field`` cells —
+                this combines domain truncation and NaN holes (values above
+                1 are read as percentages). Below it, warn and return
+                ``nan`` instead of a mean quietly dominated by whatever
+                data remains.
+
+        Returns:
+            The weighted mean, or ``nan`` (with a warning) when no weight
+            overlaps valid data or coverage is below ``min_coverage``.
+        """
+        field = np.asarray(field, dtype=float)
+        if field.shape != self.f.shape:
+            raise ValueError(
+                f"field has shape {field.shape} but the footprint grid is "
+                f"{self.f.shape}; resample the field onto the footprint "
+                "grid first.")
+        valid = np.isfinite(self.f) & np.isfinite(field)
+        wsum = float(self.f[valid].sum()) if valid.any() else 0.0
+        if wsum <= 0:
+            warnings.warn(
+                "weighted_mean: no footprint weight overlaps finite field "
+                "cells; returning nan.", UserWarning, stacklevel=2)
+            return float("nan")
+        if min_coverage is not None:
+            mc = self._as_fraction(min_coverage)
+            coverage = wsum * self.dx * self.dy
+            if coverage < mc:
+                warnings.warn(
+                    f"weighted_mean: only {coverage:.0%} of the footprint "
+                    f"falls on finite field cells (min_coverage={mc:.0%}); "
+                    "returning nan.", UserWarning, stacklevel=2)
+                return float("nan")
+        return float((self.f[valid] * field[valid]).sum() / wsum)
 
     def contours(self, rs: Any = (0.5, 0.8)) -> list[dict]:
         """Source-area isopleths: the contour enclosing ``r`` of the flux.
@@ -288,34 +477,23 @@ class Footprint:
         """
         if isinstance(rs, (int, float)):
             rs = [rs]
-        rs = [float(r) / 100.0 if r > 1 else float(r) for r in rs]
+        rs = [self._as_fraction(r) for r in rs]
         if any(not 0.0 < r <= 0.9 for r in rs):
             raise ValueError(
                 f"Source-area fractions must be in (0, 0.9], got {rs}; the "
                 "parameterisations are not defined beyond the 90% contour.")
         rs = sorted(rs)
 
-        cell = self.dx * self.dy
-        if cell == 0:
-            raise ValueError("Cannot contour a degenerate (zero cell area) grid.")
-        sf = np.sort(self.f, axis=None)[::-1]
-        sf = sf[np.isfinite(sf)]
-        csf = np.cumsum(sf) * cell
-        captured = float(csf[-1]) if csf.size else 0.0
+        sf, csf = self._cumulative_field()
 
         out = []
         for r in rs:
-            if captured <= 0 or r > captured:
-                warnings.warn(
-                    f"The {r:.0%} source area is unreachable: the domain "
-                    f"captures only {captured:.0%} of the flux. Enlarge "
-                    "`domain` to close this contour.", UserWarning,
-                    stacklevel=2)
+            located = self._locate_level(r, sf, csf, stacklevel=3)
+            if located is None:
                 out.append({"r": r, "level": float("nan"), "fraction": 0.0,
                             "vertices": [], "closed": False})
                 continue
-            idx = int(np.argmin(np.abs(csf - r)))
-            level = float(sf[idx])
+            level, fraction = located
             vertices = self._contour_vertices(level)
             # contourpy duplicates the closing vertex of a closed loop
             # exactly, so test exact equality: a relative tolerance would
@@ -324,7 +502,7 @@ class Footprint:
             closed = bool(vertices) and all(
                 len(seg) > 2 and np.array_equal(seg[0], seg[-1])
                 for seg in vertices)
-            out.append({"r": r, "level": level, "fraction": float(csf[idx]),
+            out.append({"r": r, "level": level, "fraction": fraction,
                         "vertices": vertices, "closed": closed})
         return out
 
@@ -439,10 +617,11 @@ class Footprint:
     def georeference(self, target_crs: str | None = None) -> "Footprint":
         """Place the tower-centred grid into a projected CRS (local -> real).
 
-        The local grid is translated so the tower sits at its real projected
-        position; local axes are assumed aligned with the target axes, standard
-        for the sub-kilometre domains footprints cover. Requires ``tower`` and
-        ``tower_crs``.
+        Returns a **new** footprint; ``self`` is unchanged — capture the
+        result (``fp = fp.georeference(...)``). The local grid is translated
+        so the tower sits at its real projected position; local axes are
+        assumed aligned with the target axes, standard for the sub-kilometre
+        domains footprints cover. Requires ``tower`` and ``tower_crs``.
 
         Args:
             target_crs: Projected CRS for the output. When omitted, a
@@ -564,7 +743,7 @@ class Footprint:
         if not self.is_georeferenced:
             raise ValueError(
                 "Footprint must be georeferenced before writing a TIFF; "
-                "call .georeference(target_crs) first.")
+                "georeference() returns a copy: fp = fp.georeference(crs).")
 
         west = self.x.min() - self.dx / 2
         north = self.y.max() + self.dy / 2
@@ -668,8 +847,19 @@ class Footprint:
         return str(value)
 
     def _serializable_attrs(self) -> dict[str, Any]:
+        # The frame fields (crs/tower/n) are authoritative: a user attr named
+        # e.g. "crs" must not end up in the file, where a reader would
+        # promote it to the real coordinate system.
+        shadowed = sorted(k for k, v in self.attrs.items()
+                          if k in _FRAME_ATTRS and v is not None)
+        if shadowed:
+            warnings.warn(
+                f"attrs {shadowed} shadow reserved frame metadata and are "
+                "not serialized; the footprint's own crs/tower/n fields are "
+                "authoritative.", UserWarning, stacklevel=3)
         out = {k: self._coerce_attr(v)
-               for k, v in self.attrs.items() if v is not None}
+               for k, v in self.attrs.items()
+               if v is not None and k not in _FRAME_ATTRS}
         if self.crs is not None:
             out.setdefault("crs", self.crs)
             try:  # enrich with wkt/proj4 when pyproj is available
@@ -688,8 +878,20 @@ class Footprint:
             out.setdefault("n_records", self.n)
         return out
 
+    def replace(self, **changes: Any) -> "Footprint":
+        """Return a copy with the given fields replaced (variant constructor).
+
+        E.g. ``fp.replace(time=None)`` or ``fp.replace(f=new_field)``.
+        ``attrs`` is copied, so the copy can be annotated without touching
+        the original; the ``f``/``x``/``y`` arrays are *shared* unless
+        replaced — pass ``f=fp.f.copy()`` before mutating a copy's field in
+        place. Prefer this over :func:`dataclasses.replace`, which would
+        share the ``attrs`` dict between the copies.
+        """
+        return self._replace(**changes)
+
     def _replace(self, **changes: Any) -> "Footprint":
-        """Return a copy with the given attributes replaced."""
+        """Internal spelling of :meth:`replace` (kept for existing callers)."""
         current = {
             "f": self.f, "x": self.x, "y": self.y, "time": self.time,
             "crs": self.crs, "tower": self.tower, "tower_crs": self.tower_crs,
@@ -702,8 +904,13 @@ class Footprint:
 # --------------------------------------------------------------------------- #
 # Shared NetCDF attribute helpers                                             #
 # --------------------------------------------------------------------------- #
-_RESERVED_ATTRS = {"crs", "tower_x", "tower_y", "tower_crs", "n_records",
-                   "Conventions"}
+#: Frame metadata written from the typed fields, never from user attrs
+#: (colliding user attrs warn and are dropped at serialization).
+_FRAME_ATTRS = frozenset({"crs", "crs_wkt", "crs_proj4", "tower_x", "tower_y",
+                          "tower_crs", "n_records"})
+#: Keys stripped from global attrs on read (frame metadata + file-level
+#: markers); everything else round-trips into ``attrs``.
+_RESERVED_ATTRS = _FRAME_ATTRS | {"Conventions"}
 
 
 def _pack_footprint(ds: "xr.Dataset", decimals: int, dtype: str = "int32") -> "xr.Dataset":
@@ -807,12 +1014,27 @@ class FootprintSeries:
             raise ValueError("FootprintSeries requires at least one footprint.")
         ref = footprints[0]
         for fp in footprints[1:]:
-            if fp.f.shape != ref.f.shape or not np.allclose(fp.x, ref.x) \
-                    or not np.allclose(fp.y, ref.y):
-                raise ValueError("All footprints must share the same grid.")
-            if fp.crs != ref.crs:
-                raise ValueError("All footprints must share the same crs.")
+            self._check_member(fp, ref)
         self.footprints = list(footprints)
+
+    @staticmethod
+    def _check_member(fp: Footprint, ref: Footprint) -> None:
+        """The series invariant: one shared grid, one shared frame."""
+        if fp.f.shape != ref.f.shape or not np.allclose(fp.x, ref.x) \
+                or not np.allclose(fp.y, ref.y):
+            raise ValueError("All footprints must share the same grid.")
+        if fp.crs != ref.crs:
+            raise ValueError("All footprints must share the same crs.")
+
+    def append(self, fp: Footprint) -> None:
+        """Append a footprint after validating it shares the grid and frame.
+
+        Use this — not ``series.footprints.append`` — to grow a series:
+        direct list mutation bypasses the shared-grid/shared-crs validation
+        and defers the failure to an unrelated call site.
+        """
+        self._check_member(fp, self.footprints[0])
+        self.footprints.append(fp)
 
     def __len__(self) -> int:
         return len(self.footprints)
@@ -820,8 +1042,22 @@ class FootprintSeries:
     def __iter__(self) -> Iterator[Footprint]:
         return iter(self.footprints)
 
-    def __getitem__(self, i: int) -> Footprint:
+    def __getitem__(self, i: int | slice) -> "Footprint | FootprintSeries":
+        """Member at ``i``, or a sub-series for a slice."""
+        if isinstance(i, slice):
+            sliced = self.footprints[i]
+            if not sliced:
+                raise ValueError(
+                    f"slice {i!r} selects no members; a FootprintSeries "
+                    "cannot be empty.")
+            return FootprintSeries(sliced)
         return self.footprints[i]
+
+    def __repr__(self) -> str:
+        ref = self.footprints[0]
+        frame = self.crs if self.is_georeferenced else "local"
+        return (f"<FootprintSeries nt={self.nt} "
+                f"grid={ref.ny}x{ref.nx} frame={frame!r}>")
 
     @property
     def nt(self) -> int:
@@ -858,33 +1094,43 @@ class FootprintSeries:
         return np.stack([fp.f for fp in self.footprints])
 
     def aggregate(self, *, smooth: bool = True) -> Footprint:
-        """Collapse the stack to a 2-D climatology (mean over time).
+        """Collapse the stack to a 2-D climatology (nan-mean over time).
 
         Args:
-            smooth: If True, apply the standard 3x3 kernel twice (needs scipy).
+            smooth: If True, apply the standard 3x3 kernel twice (needs
+                scipy). The result records ``attrs["smoothed"]``.
 
         Returns:
             A climatological :class:`Footprint` (``time=None``) on the shared
             grid, with ``n`` summed across members when available.
         """
-        fclim = np.nanmean(self.stack(), axis=0)
-        if smooth:
-            sg = _require("scipy.signal", "")  # scipy is a core dependency
-            kernel = np.array([[0.05, 0.1, 0.05],
-                               [0.10, 0.4, 0.10],
-                               [0.05, 0.1, 0.05]])
-            fclim = sg.convolve2d(fclim, kernel, mode="same")
-            fclim = sg.convolve2d(fclim, kernel, mode="same")
-        counts = [fp.n for fp in self.footprints if fp.n is not None]
         ref = self.footprints[0]
+        # Incremental nan-mean: one pass with two grid-plane accumulators
+        # instead of materializing the (nt, ny, nx) stack — which peaked at
+        # ~3x the series' memory to produce a single output plane.
+        total = np.zeros(ref.f.shape)
+        finite_counts = np.zeros(ref.f.shape)
+        for fp in self.footprints:
+            finite = np.isfinite(fp.f)
+            total += np.where(finite, fp.f, 0.0)
+            finite_counts += finite
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fclim = total / finite_counts  # 0/0 -> NaN: all-NaN cells stay NaN
+        if smooth:
+            fclim = smooth_field(fclim)
+        counts = [fp.n for fp in self.footprints if fp.n is not None]
         # Carry provenance the members agree on (e.g. 'model',
         # 'estimated_inputs') onto the climatology; per-member values (e.g.
         # 'group', 'captured_fraction') are dropped rather than fabricated.
         # 'history' is never equality-carried (member timestamps differ by
         # wall clock); the climatology gets its own fresh entry instead.
+        # Per-member smoothing settings ('smooth_data'/'smoothed') describe
+        # the members, not the climatology — carrying smooth_data=0 onto a
+        # field this method just smoothed would invite a second smoothing
+        # pass downstream, so they are dropped and 'smoothed' stamped fresh.
         attrs = {}
         for key, value in ref.attrs.items():
-            if key == "history":
+            if key in ("history", "smooth_data", "smoothed"):
                 continue
             try:
                 if all(bool(np.all(fp.attrs.get(key) == value))
@@ -892,6 +1138,8 @@ class FootprintSeries:
                     attrs[key] = value
             except (TypeError, ValueError):
                 continue
+        if smooth:
+            attrs["smoothed"] = 1
         from .version import __version__
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         attrs["history"] = (f"{stamp} aggregated {len(self.footprints)} "
@@ -904,6 +1152,7 @@ class FootprintSeries:
     def georeference(self, target_crs: str | None = None) -> "FootprintSeries":
         """Georeference every member onto the same projected grid.
 
+        Returns a **new** series; ``self`` is unchanged — capture the result.
         Computes the translation once from the shared tower position and applies
         it to all members. ``target_crs`` defaults to a tower-centred LAEA
         (:func:`laea_crs`). Requires ``datetime`` timestamps on every member.
@@ -918,15 +1167,11 @@ class FootprintSeries:
         if ref.tower is None or ref.tower_crs is None:
             raise ValueError("tower and tower_crs are required to georeference.")
 
-        pyproj = _require("pyproj", "crs")
-        if target_crs is None:
-            target_crs = _tower_laea(pyproj, ref.tower, ref.tower_crs)
-        transformer = pyproj.Transformer.from_crs(
-            ref.tower_crs, target_crs, always_xy=True)
-        tx, ty = transformer.transform(ref.tower[0], ref.tower[1])
-        new_x, new_y = ref.x + tx, ref.y + ty
+        # One home for the transform: translate the first member, share its
+        # projected axes across the series (the grid is common by invariant).
+        geo = ref.georeference(target_crs)
         return FootprintSeries([
-            fp._replace(x=new_x, y=new_y, crs=target_crs)
+            fp._replace(x=geo.x, y=geo.y, crs=geo.crs)
             for fp in self.footprints])
 
     # -- NetCDF (optional: xarray / netcdf4) ------------------------------- #
@@ -945,10 +1190,11 @@ class FootprintSeries:
         counts = [fp.n for fp in self.footprints]
         if all(c is not None for c in counts):
             data["n_records"] = (("time",), np.asarray(counts, dtype="int64"))
+        time_values, time_attrs = _time_axis(self.times)
         ds = xr.Dataset(
             data,
             coords={
-                "time": ("time", _time_axis(self.times)),
+                "time": ("time", time_values, time_attrs),
                 "x": ("x", ref.x, _coord_attrs("x", self.is_georeferenced)),
                 "y": ("y", ref.y, _coord_attrs("y", self.is_georeferenced)),
             },
@@ -971,12 +1217,17 @@ class FootprintSeries:
         extra = {k: v for k, v in a.items() if k not in _RESERVED_ATTRS}
         counts = ds["n_records"].to_numpy() if "n_records" in ds.variables else None
         times = ds["time"]
+        # A marked index axis is structural, not data: restore time=None so
+        # climatology members stay climatologies (and georeferenced series
+        # remain readable — a relative label would violate the frame invariant).
+        index_axis = times.attrs.get("fluxprint_time") == "index"
         footprints = []
         for i in range(ds.sizes["time"]):
             footprints.append(Footprint(
                 f=ds["footprint"].isel(time=i).to_numpy(),
                 x=ds["x"].to_numpy(), y=ds["y"].to_numpy(),
-                time=_read_time(times.isel(time=i)), **frame,
+                time=None if index_axis else _read_time(times.isel(time=i)),
+                **frame,
                 n=int(counts[i]) if counts is not None else None,
                 attrs=dict(extra)))
         return cls(footprints)
@@ -1001,11 +1252,32 @@ class FootprintSeries:
             return cls.from_xarray(ds)
 
 
-def _time_axis(times: list[datetime | float | None]) -> np.ndarray:
-    """Build a time coordinate array from per-step labels."""
+#: Marker attr on the time coordinate: the axis is a structural member index,
+#: not data — readers must restore ``time=None`` per member.
+_INDEX_AXIS_ATTRS = {"long_name": "member index (no per-member time labels)",
+                     "fluxprint_time": "index"}
+
+
+def _time_axis(times: list[datetime | float | None],
+               ) -> tuple[np.ndarray, dict]:
+    """Build a time coordinate ``(values, attrs)`` from per-step labels.
+
+    All-datetime and all-relative labels are written as themselves. A series
+    with no labels at all (e.g. grouped climatologies from
+    ``calculate_footprint(by=<categorical>)``) needs *some* axis for the
+    NetCDF layout, so a member index is written — marked with
+    ``fluxprint_time="index"`` so :meth:`FootprintSeries.from_xarray`
+    restores ``time=None`` instead of promoting the index to fake relative
+    labels. Mixed labels cannot share one axis: they degrade to the marked
+    index with an explicit warning (the labels are not round-tripped).
+    """
     if all(isinstance(t, datetime) for t in times):
-        return np.array([np.datetime64(t) for t in times])
+        return np.array([np.datetime64(t) for t in times]), {}
     if all(_is_relative_label(t) for t in times):
-        return np.asarray(times, dtype=float)
-    # Mixed/None labels: fall back to an integer index.
-    return np.arange(len(times))
+        return np.asarray(times, dtype=float), {}
+    if any(t is not None for t in times):
+        warnings.warn(
+            "mixed/partial per-member time labels cannot be represented on "
+            "one time axis; writing a member index instead (the labels are "
+            "not round-tripped).", UserWarning, stacklevel=3)
+    return np.arange(len(times)), dict(_INDEX_AXIS_ATTRS)

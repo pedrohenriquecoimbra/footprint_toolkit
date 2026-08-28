@@ -35,9 +35,11 @@ science:
 
 ## Features
 
-- **Footprint models** behind one interface, selected by name (currently
-  Kljun et al., 2015; Hsieh et al., 2000 is an experimental work in progress;
-  Kormann & Meixner, 2001 is planned).
+- **Footprint models** behind one interface, selected by name: Kljun et al.
+  (2015) and Hsieh et al. (2000, with the Detto et al. 2006 crosswind
+  expansion); Kormann & Meixner (2001) is planned. A new model is only its
+  physics — a per-record kernel registered with `@footprint_model` inherits
+  the grid, record loop, validation, smoothing and provenance.
 - **A typed footprint object** (`Footprint`): a 2-D source-area field on a fixed
   grid centred on the tower, plus `FootprintSeries` for time-ordered stacks.
 - **Two coordinate frames**: a local, tower-centred metric grid, and a
@@ -184,12 +186,29 @@ their original implementation — CI enforces this.
 ## API reference
 
 ### Top level (`import fluxprint`)
-- `calculate_footprint(data, by=None, model="kljun2015", ...)` — footprint each
-  group of a table; returns a `FootprintSeries`.
+- `calculate_footprint(data, by=None, model="kljun2015", on_error="skip", ...)`
+  — footprint each group of a table; returns a `FootprintSeries`.
+  `on_error` decides what a failed group costs: drop it (`"skip"`), abort
+  (`"raise"`), or keep an all-NaN member with the reason in `attrs["error"]`
+  (`"nan"`). The series is eager — right for grouped climatologies (tens to
+  hundreds of members); for one footprint per record over long records,
+  use `map_footprints` below instead.
+- `map_footprints(data, model="kljun2015", ...)` — the xarray/dask-native
+  compute path: maps the model's per-record kernel over arrays of any
+  dimensionality and returns a `DataArray` with dims `(*input_dims, y, x)`.
+  Lazy over dask-backed inputs; a bad record costs a NaN plane, never the
+  job; rejections are summarised once per block.
 - `wrapper(...)` — `calculate_footprint` + aggregation + optional file output.
-- `empty_footprint(model, domain=..., dx=...)` — a NaN template on the model's grid.
+- `empty_footprint(model, domain=..., dx=...)` — a NaN template on the model's
+  grid. This is the template API: use it to learn the exact output grid/shape
+  (~2 ms) instead of running the model on placeholder meteorology.
+- `ALIASES` — the table of column aliases `process_footprint_inputs` recognizes
+  (model inputs and estimator drivers).
 - `read_handler` / `read_from_url` / `read_from_file` — table/NetCDF/TIFF readers.
 - Legacy `write_to_*` helpers are deprecated: use the `Footprint.to_*` methods.
+- `fluxprint.commons.start_logging(path)` — opt-in file logging for
+  applications: attaches a handler to the `fluxprint` logger (the package
+  itself stays silent by default via a `NullHandler`).
 
 ### `fluxprint.model`
 - `get_model(name)` — return the registered model callable.
@@ -201,6 +220,16 @@ their original implementation — CI enforces this.
 - `Footprint.from_grid(f, dx, dy=None, **meta)` — build a local, tower-centred footprint.
 - `georeference(target_crs)` / `to_lonlat()` — local → projected; display lon/lat.
 - `total()`, `peak_xy()`, `normalized()`, `contours(rs)` — analysis helpers.
+- `captured_fraction` — fraction of the flux the domain captures (= `total()`).
+- `level_for(r)` — the source-area field level for fraction `r` (fractions are
+  of the full unit-integral footprint, not of the captured total).
+- `smoothed()` — the standard FFP 3×3 double-convolution smoothing, applicable
+  to any footprint (`fluxprint.footprint.smooth_field` is the array primitive).
+- `weighted_mean(field, min_coverage=None)` — footprint-weighted mean of a
+  gridded quantity; owns the NaN mask and the coverage threshold, and returns
+  a uniform field unchanged whatever the normalization or truncation.
+- `replace(**changes)` — variant constructor (`fp.replace(time=None)`);
+  copies `attrs`, shares the arrays unless replaced.
 - `plot(rs=None)` — matplotlib quick look (never calls `plt.show()`).
 - `to_netcdf` / `from_netcdf`, `to_tiff` / `from_tiff`, `to_xarray` /
   `from_xarray`, `to_shapefile`.

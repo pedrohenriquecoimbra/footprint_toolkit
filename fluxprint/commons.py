@@ -6,17 +6,9 @@ This script is a key part of the following publications:
     Available at SSRN: https://ssrn.com/abstract=4642939 or http://dx.doi.org/10.2139/ssrn.4642939
 """
 # standard modules
-import numpy as np
-import copy
 import os
-import re
-import warnings
 import logging
 import datetime
-
-# 3rd party modules
-
-# project modules
 
 
 def start_logging(outputpath, *, level=logging.INFO, **kwargs):
@@ -80,42 +72,3 @@ def update_nested_dict(d, u):
             d[k] = v
     # Return the updated dictionary
     return d
-
-
-# Allowed data types
-ALLOWED_DTYPES = {
-    None, 'uint8', 'uint16', 'int16', 'uint32', 'int32',
-    'float32', 'float64', 'complex64', 'complex128',
-    'complex', 'int64', 'uint64', 'int8', 'complex_int16'
-}
-
-# Mapping from unsupported → closest supported
-UNSUPPORTED_MAP = {
-    np.float16: np.float32,
-    np.intp: np.int64,              # platform-dependent
-    np.uintp: np.uint64,            # platform-dependent
-}
-
-
-def ensure_supported_dtype(arr):
-    if not isinstance(arr, np.ndarray):
-        arr = np.array(arr)
-
-    dtype_str = str(arr.dtype)
-
-    if dtype_str in ALLOWED_DTYPES:
-        return arr
-
-    # Check for direct mapping from unsupported → supported
-    if arr.dtype.type in UNSUPPORTED_MAP:
-        return arr.astype(UNSUPPORTED_MAP[arr.dtype.type])
-
-    # Default fallback (e.g., float16 or unknown types)
-    if np.issubdtype(arr.dtype, np.floating):
-        return arr.astype(np.float32)
-    elif np.issubdtype(arr.dtype, np.complexfloating):
-        return arr.astype(np.complex64)
-    elif np.issubdtype(arr.dtype, np.integer):
-        return arr.astype(np.int32)
-
-    raise TypeError(f"Unsupported data type: {arr.dtype}")

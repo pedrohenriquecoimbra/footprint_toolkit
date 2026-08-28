@@ -5,6 +5,186 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to follow [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor releases may contain breaking changes, announced here).
 
+## [0.4.0] - in progress
+
+The genericization release: a model is only physics. The scaffolding every
+footprint model used to copy now lives in a generic layer, and the registered
+Kljun model remains bitwise identical to the vendored reference at every
+step (CI-enforced).
+
+### Added
+- `fluxprint.grid`: `GridSpec` (output shape/axes known without compute),
+  `resolve_grid()` (the FFP domain/dx/dy/nx/ny reconciliation rules, hoisted
+  verbatim), `GridContext` (cached cartesian + lazy polar coordinates), and
+  the wind-frame primitives `rotate_theta()` / `to_wind_frame()` with a
+  documented meteorological convention.
+- `fluxprint.model.engine`: the model-agnostic driver — `normalize_inputs()`,
+  `run_climatology()` (validate/accumulate/normalize/smooth loop with
+  reference-exact `flag_err` bookkeeping), `build_footprint()` (provenance
+  attrs + `captured_fraction` diagnostic), and the `@footprint_model`
+  decorator that turns a bare per-record kernel into a fully registered
+  model with the canonical signature.
+- The Kljun port now runs on this pipeline; its physics is the module-private
+  `_kljun_record` kernel (moved verbatim, bug-for-bug). The file shrank by
+  ~200 lines of scaffolding.
+- `smooth` as the generic spelling of the model-level smoothing knob;
+  `smooth_data` remains fully supported (downstream-pinned). `smooth` wins
+  when both are given.
+- `empty_footprint()` resolves the grid directly via the model's
+  `resolve_grid` hook — no more placeholder model run (microseconds instead
+  of milliseconds; grid equality with a real run is pinned by a test).
+- Regression safety net: grid-variant oracle cases (default/nx-only/dx-only/
+  domain+nx/dx+nx) and a dtype pin in the reference-equivalence suite; a
+  downstream-contract test file pinning the surface fluxcom's FFPProvider
+  depends on.
+- `map_footprints()`: the xarray/dask-native compute path. Maps the model's
+  per-record kernel over arrays of any dimensionality (aliases recognized)
+  and returns `(*input_dims, y, x)`; lazy over dask-backed inputs; pinned to
+  reproduce single-record model calls bitwise. Per-record validation is
+  silent on this path — rejections are summarised once per block instead of
+  logged one line per record.
+- `Footprint.weighted_mean(field, min_coverage=None)`: footprint-weighted
+  mean of a gridded quantity owning the NaN mask and coverage threshold; a
+  uniform field of 1.0 returns exactly 1.0 regardless of normalization or
+  domain truncation.
+- `calculate_footprint(on_error=...)`: `"skip"` (default, previous
+  behavior), `"raise"`, or `"nan"` — an all-NaN member per failed group with
+  the reason in `attrs["error"]`, so long batches keep one slot per group.
+- The kernel protocol on model callables: `.kernel`, `.resolve_grid`,
+  `.validate`, `.model_options`, `.option_defaults` — attached by
+  `@footprint_model` and by the Kljun adapter; `map_footprints` and
+  `empty_footprint` are built on it.
+- **`hsieh2000` is a registered model**: Hsieh et al. (2000) with the Detto
+  et al. (2006) crosswind expansion, implemented as an analytic kernel on
+  the generic driver (`fluxprint/model/Hsieh_et_al_2000.py` shrank to
+  equations + registration; `peak_distance()` exposes Eq 19). The pre-0.4
+  experimental draft — never registered — is replaced: it rotated the grid
+  with a math-angle rotation and returned per-pixel fractions; the
+  registered model evaluates on the fixed grid via the wind-frame transform
+  and returns a proper m**-2 density. `z0` is required (no `umean` mode);
+  `pblh` participates only in validation. Pinned by a golden-snapshot
+  oracle (`tests/data/hsieh2000_reference.npz`, regenerate script alongside)
+  plus paper-derived invariants (cumulative `exp(-A/x)`, Eq 19 peak
+  distance, Detto Eq B4 crosswind spread) in `tests/test_hsieh_reference.py`.
+  The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
+  generic `Footprint.weighted_mean()`.
+- `FootprintSeries` is a real container now: slicing returns a
+  `FootprintSeries` (previously a bare list), `append()` grows a series with
+  the shared-grid/shared-frame validation applied (direct
+  `series.footprints.append` bypasses it), and the series has an
+  informative `repr`.
+- `Footprint.replace(**changes)`: the public variant constructor (copies
+  `attrs`; shares arrays unless replaced). `_replace` remains as the
+  internal spelling.
+
+### Fixed
+- User attrs that shadow reserved frame metadata (`crs`, `crs_wkt`,
+  `crs_proj4`, `tower_x`, `tower_y`, `tower_crs`, `n_records`) now warn and
+  are dropped at serialization instead of overriding the real frame — a
+  note like `attrs["crs"] = "WGS84"` could previously become the
+  authoritative CRS on reload. `crs_wkt`/`crs_proj4` also no longer
+  reappear as user attrs after a round-trip.
+- A series with no per-member time labels (e.g. grouped climatologies from
+  `calculate_footprint(by=<categorical>)`) now writes a *marked* index time
+  axis, and `from_xarray`/`from_netcdf` restore `time=None` instead of
+  promoting the index to fake relative labels. This also fixes the
+  write-succeeds/read-fails asymmetry: a georeferenced climatology series
+  NetCDF is now readable by the library that wrote it. Mixed per-member
+  labels degrade to the marked index with an explicit warning.
+- `calculate_footprint(on_error="nan")` gives every failed group its own
+  field array; previously all NaN slots in a series shared one buffer, so
+  editing one member in place silently rewrote the others.
+- `FootprintSeries.aggregate(smooth=True)` now stamps `attrs["smoothed"]=1`
+  and drops the members' `smooth_data`/`smoothed` attrs instead of carrying
+  `smooth_data=0` onto a field it just smoothed — which invited a second,
+  footprint-widening smoothing pass downstream.
+
+### Changed
+- The `regorator` upper bound (`<0.3`) is dropped: fluxprint uses a
+  two-function surface that is stable across regorator releases, and an
+  upper cap on a library dependency only creates resolver conflicts
+  downstream. The floor stays at `>=0.2` (the version CI exercises).
+- `Footprint` construction now rejects descending or empty coordinate axes
+  with an actionable error (flip north-first rasters before constructing);
+  previously a descending axis silently flipped the sign of `dx`/`dy` and
+  every cell-area-dependent quantity (`total()`, coverage, contour levels).
+- `calculate_footprint`'s docs (and the README) now state the eager-series
+  vs `map_footprints` division of labor: series for grouped climatologies,
+  the mapped path for one-footprint-per-record at scale.
+- `FootprintSeries.aggregate()` computes the climatology incrementally (two
+  grid-plane accumulators, one pass) instead of materializing the full
+  `(nt, ny, nx)` stack plus nanmean's internal copies — peak memory for the
+  mean is now two planes regardless of series length. Same nan-mean
+  semantics (per-cell NaN holes ignored; all-NaN cells stay NaN).
+- The registered `kljun2015` adapter is now generated by `@footprint_model`
+  instead of hand-written — the model file no longer duplicates the generic
+  driver line for line. Same signature, same numerics (bitwise-pinned), same
+  provenance attrs; only the function's `__name__` changes to
+  `kljun2015_calc`.
+- Column-alias resolution in `process_footprint_inputs` is now one
+  first-match-wins scan (canonical name, then the `ALIASES` spellings in
+  declared order), matching `map_footprints`. Two edge cases change: with
+  two different alias columns present (e.g. `wd` and `wind_direction`) the
+  first declared alias now wins instead of the last, and a
+  case-insensitively matched canonical column (e.g. `WIND_DIR`) now beats an
+  exact alias column. Resolved values are consistently lists.
+
+### Deprecated
+- `fluxprint.utils.get_contour_levels()` / `get_contour_vertices()`: use
+  `Footprint.level_for()` / `Footprint.contours()`.
+- `fluxprint.template.DEFAULT_ATTRS` (PEP 562 warning on access): provenance
+  attrs are stamped by the models; `empty_footprint()` is the template API.
+- The remaining zero-caller legacy helpers in `fluxprint.utils` now warn:
+  `structuredData`, `transform_crs` (use `transform_coordinates`),
+  `center_footprint`/`update_affine` (use `Footprint.georeference()`),
+  `plot_footprint` (use `Footprint.plot()`), `is_footprint_dict`,
+  `find_utm_epsg_from_lon`, `find_middle_point`, `identify_convention`,
+  `attribute_crs`, `reproject_tif`.
+
+### Removed
+- The unreachable `crop` block in `calc_ffp_climatology` (never reachable
+  through the package API). Passing `crop`/`rs` now emits a
+  `DeprecationWarning` pointing at `Footprint.contours()`/`level_for()`.
+- `fluxprint.aggregate_footprints` (deprecated in 0.3.0; one full cycle
+  served): use `FootprintSeries.aggregate()`. The removal of the also-
+  deprecated `get_contour` is deferred to the release that removes the
+  legacy `io.write_*` writers, whose shapefile writer still calls it.
+- Dead code: an unreachable duplicate block in `utils.convert_to_object`, the
+  broken `utils.find_utm_epsg_from_lon_deprecated`, the unused
+  `commons.ensure_supported_dtype` machinery, the unused
+  `fluxprint.model.kljun2015_o` alias (the vendored reference stays
+  importable by its full path, and `import fluxprint` no longer loads it),
+  and leftover unused imports.
+
+## [0.3.1] - unreleased
+
+Additive generic-layer API (the 0.3.1 fast-follow); no model files touched.
+
+### Added
+- `fluxprint.footprint.smooth_field()` and `FFP_SMOOTH_KERNEL`: the standard
+  FFP 3x3 double-convolution smoothing as a model-agnostic primitive, and
+  `Footprint.smoothed()` to apply it to any footprint.
+  `FootprintSeries.aggregate` and the deprecated `aggregate_footprints` now
+  share this single implementation.
+- `Footprint.level_for(r)`: the source-area field level for a fraction `r`,
+  without contour extraction; `Footprint.contours()` uses the same search.
+  Fractions are of the full (unit-integral) model footprint, not of the
+  captured total - the two differ on any truncated domain.
+- `Footprint.captured_fraction`: live property (equal to `total()`), the
+  generic counterpart of the model-stamped `attrs["captured_fraction"]`.
+- `fluxprint.ALIASES`: the exported table of column aliases recognized by
+  `process_footprint_inputs` (model inputs and estimator drivers), so
+  downstream integrations no longer maintain their own copy.
+
+### Changed
+- `process_footprint_inputs(data=...)` now raises a `TypeError` naming the
+  supported containers when `data` is neither a DataFrame nor a dict (e.g. an
+  `xarray.Dataset`); previously such input was silently ignored and the
+  computation proceeded from kwargs alone.
+
+### Deprecated
+- `fluxprint.utils.smooth_data()`: use `fluxprint.footprint.smooth_field()`.
+
 ## [0.3.0] - 2026-08-28
 
 ### Added

@@ -1,6 +1,8 @@
+import warnings
+
 import numpy as np
 
-DEFAULT_ATTRS = {
+_DEFAULT_ATTRS = {
     '__global__': {
         # f'Diurnal Footprints for {data_to_nc.sitename} at 30-min resolution',
         'Title': 'Flux Footprint',
@@ -37,3 +39,16 @@ DEFAULT_ATTRS = {
                   "units": "per square meter",
                   "10^?": 0},
 }
+
+
+def __getattr__(name):
+    # PEP 562 deprecation shim: the public name warns, the private one is the
+    # internal spelling (used by fluxprint.utils without triggering this).
+    if name == "DEFAULT_ATTRS":
+        warnings.warn(
+            "fluxprint.template.DEFAULT_ATTRS is deprecated and will be "
+            "removed in a future release; provenance attrs are stamped by "
+            "the models, and empty_footprint() is the template API.",
+            DeprecationWarning, stacklevel=2)
+        return _DEFAULT_ATTRS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -2,24 +2,114 @@
 
 """
 
-import numbers
 import logging
+import warnings
+
 import numpy as np
-from scipy import signal as sg
 
 
-from ..exceptions import *
-from ..footprint import Footprint
-from .base import register_model
+from ..exceptions import InputValidationError, exceptions, raise_ffp_exception
+from ..grid import GridContext, resolve_grid
+from . import engine
 
 logger = logging.getLogger('fluxprint.model.kljun_et_al_2015')
 
 # from __future__ import print_function
 
 
+def _kljun_record(ctx, rec, opts):
+    """Kljun et al. (2015) per-record footprint field on the fixed grid.
+
+    The FFP reference's loop body, moved verbatim (bug-for-bug: this path is
+    pinned bitwise to the vendored reference — do not clean anything up).
+    Returns ``(f_2d, flag, valid)``; ``flag=3`` marks a record that proved
+    invalid mid-computation (``log(zm/z0) <= psi_f``).
+    """
+    #===========================================================================
+    # Model parameters
+    a = 1.4524
+    b = -1.9914
+    c = 1.4622
+    d = 0.1359
+    ac = 2.17
+    bc = 1.66
+    cc = 20.0
+
+    oln = 5000 #limit to L for neutral scaling
+    k = 0.4 #von Karman
+
+    ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean = rec
+    x_2d = ctx.x_2d
+    rho = ctx.rho
+    theta = ctx.theta
+    flag = 0
+    valid = 1
+
+    #===========================================================================
+    # Rotate coordinates into wind direction
+    if wind_dir is not None:
+        rotated_theta = theta - wind_dir * np.pi / 180.
+
+    #===========================================================================
+    # Create real scale crosswind integrated footprint and dummy for
+    # rotated scaled footprint
+    fstar_ci_dummy = np.zeros(x_2d.shape)
+    f_ci_dummy = np.zeros(x_2d.shape)
+    xstar_ci_dummy = np.zeros(x_2d.shape)
+    px = np.ones(x_2d.shape)
+    if z0 is not None:
+        # Use z0
+        if mo_length <= 0 or mo_length >= oln:
+            xx = (1 - 19.0 * zm/mo_length)**0.25
+            psi_f = (np.log((1 + xx**2) / 2.) + 2. * np.log((1 + xx) / 2.) - 2. * np.arctan(xx) + np.pi/2)
+        elif mo_length > 0 and mo_length < oln:
+            psi_f = -5.3 * zm / mo_length
+        if (np.log(zm / z0)-psi_f)>0:
+            xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
+            px = np.where(xstar_ci_dummy > d)
+            fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
+            f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
+        else:
+            flag = 3
+            valid = 0
+    else:
+        # Use umean if z0 not available
+        xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (umean / ustar * k))
+        px = np.where(xstar_ci_dummy > d)
+        fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
+        f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (umean / ustar * k))
+
+    #===========================================================================
+    # Calculate dummy for scaled sig_y* and real scale sig_y
+    sigystar_dummy = np.zeros(x_2d.shape)
+    sigystar_dummy[px] = (ac * np.sqrt(bc * np.abs(xstar_ci_dummy[px])**2 / (1 +
+                          cc * np.abs(xstar_ci_dummy[px]))))
+
+    if abs(mo_length) > oln:
+        mo_length = -1E6
+    if mo_length <= 0:   #convective
+        scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.80
+    elif mo_length > 0:  #stable
+        scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.55
+    if scale_const > 1:
+        scale_const = 1.0
+
+    sigy_dummy = np.zeros(x_2d.shape)
+    sigy_dummy[px] = (sigystar_dummy[px] / scale_const * zm * v_sigma / ustar)
+    sigy_dummy[sigy_dummy < 0] = np.nan
+
+    #===========================================================================
+    # Calculate real scale f(x,y)
+    f_2d = np.zeros(x_2d.shape)
+    f_2d[px] = (f_ci_dummy[px] / (np.sqrt(2 * np.pi) * sigy_dummy[px]) *
+                np.exp(-(rho[px] * np.sin(rotated_theta[px]))**2 / ( 2. * sigy_dummy[px]**2)))
+
+    return f_2d, flag, valid
+
+
 def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v_sigma=None, ustar=None,
-                    wind_dir=None, domain=None, dx=None, dy=None, nx=None, ny=None, 
-                    rs=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], rslayer=0,
+                    wind_dir=None, domain=None, dx=None, dy=None, nx=None, ny=None,
+                    rs=None, rslayer=0,
                     smooth_data=1, crop=False, pulse=None, verbosity=2, **kwargs):
     """
     Derive a flux footprint estimate based on the simple parameterisation FFP
@@ -62,16 +152,15 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
                        Large nx/ny result in higher spatial resolution and higher computing time
                        Default is nx = ny = 1000. If only nx is given, nx=ny.
                        If both dx/dy and nx/ny are given, dx/dy is given priority if the domain is also specified.
-        rs           = Percentage of source area for which to provide contours, must be between 10% and 90%. 
-                       Can be either a single value (e.g., "80") or a list of values (e.g., "[10, 20, 30]")
-                       Expressed either in percentages ("80") or as fractions of 1 ("0.8"). 
-                       Default is [10:10:80]. Set to "None" for no output of percentages
+        rs           = DEPRECATED, ignored: source areas moved to
+                       Footprint.contours() / Footprint.level_for().
         rslayer      = Calculate footprint even if zm within roughness sublayer: set rslayer = 1
-                       Note that this only gives a rough estimate of the footprint as the model is not 
+                       Note that this only gives a rough estimate of the footprint as the model is not
                        valid within the roughness sublayer. Default is 0 (i.e. no footprint for within RS).
                        z0 is needed for estimation of the RS.
         smooth_data  = Apply convolution filter to smooth footprint climatology if smooth_data=1 (default)
-        crop         = Crop output area to size of the 80% footprint or the largest r given if crop=1
+        crop         = DEPRECATED, ignored: crop via Footprint.contours() and
+                       slicing instead.
         pulse        = Display progress of footprint calculations every pulse-th footprint (e.g., "100")
         verbosity    = Level of verbosity at run time: 0 = completely silent, 1 = notify only of fatal errors,
                        2 = all notifications
@@ -81,12 +170,8 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
         x_2d	    = x-grid of 2-dimensional footprint [m]
         y_2d	    = y-grid of 2-dimensional footprint [m]
         fclim_2d = Normalised footprint function values of footprint climatology [m-2]
-        rs       = Percentage of footprint as in input, if provided
-        fr       = Footprint value at r, if r is provided
-        xr       = x-array for contour line of r, if r is provided
-        yr       = y-array for contour line of r, if r is provided
         n        = Number of footprints calculated and included in footprint climatology
-        flag_err = 0 if no error, 1 in case of error, 2 if not all contour plots (rs%) within specified domain,
+        flag_err = 0 if no error, 1 in case of error,
                    3 if single data points had to be removed (outside validity)
 
     Created: 19 May 2016 natascha kljun
@@ -96,101 +181,22 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     Copyright (C) 2015 - 2023 Natascha Kljun
     """
 
-    #===========================================================================
-    # Input check
-    flag_err = 0
-        
-    # Check existence of required input pars
-    if None in [zm, pblh, mo_length, v_sigma, ustar] or (z0 is None and umean is None):
-        # miss_cols = [i for i, c in enumerate([zm, pblh, mo_length, v_sigma, ustar]) if c is None]
-        # logger.error(f"Missing columns: {'; '.join(miss_cols) if miss_cols else '`z0` and `umean`.'}")
-        raise_ffp_exception(1, verbosity)
-
-    # Convert all input items to lists
-    if not isinstance(zm, list): zm = [zm]
-    if not isinstance(pblh, list): pblh = [pblh]
-    if not isinstance(mo_length, list): mo_length = [mo_length]
-    if not isinstance(v_sigma, list): v_sigma = [v_sigma]
-    if not isinstance(ustar, list): ustar = [ustar]
-    if not isinstance(wind_dir, list): wind_dir = [wind_dir]
-    if not isinstance(z0, list): z0 = [z0]
-    if not isinstance(umean, list): umean = [umean]
-
-    # Check that all lists have same length, if not raise an error and exit
-    ts_len = len(ustar)
-    if any(len(lst) != ts_len for lst in [v_sigma, wind_dir, pblh, mo_length]):
-        # at least one list has a different length, exit with error message
-        raise_ffp_exception(11, verbosity)
-
-    # Special treatment for zm, which is allowed to have length 1 for any
-    # length >= 1 of all other parameters
-    if all(val is None for val in zm): raise_ffp_exception(12, verbosity)
-    if len(zm) == 1:
-        raise_ffp_exception(17, verbosity)
-        zm = [zm[0] for i in range(ts_len)]
-
-    # Resolve ambiguity if both z0 and umean are passed (defaults to using z0)
-    # If at least one value of z0 is passed, use z0 (by setting umean to None)
-    if not all(val is None for val in z0):
-        raise_ffp_exception(13, verbosity)
-        umean = [None for i in range(ts_len)]
-        # If only one value of z0 was passed, use that value for all footprints
-        if len(z0) == 1: z0 = [z0[0] for i in range(ts_len)]
-    elif len(umean) == ts_len and not all(val is None for val in umean):
-        raise_ffp_exception(14, verbosity)
-        z0 = [None for i in range(ts_len)]
-    else:
-        raise_ffp_exception(15, verbosity)
-
-    # Rename lists as now the function expects time series of inputs
-    ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans = \
-            ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean
+    if crop:
+        warnings.warn(
+            "calc_ffp_climatology(crop=...) is deprecated and ignored; crop "
+            "via Footprint.contours()/level_for() and array slicing instead.",
+            DeprecationWarning, stacklevel=2)
+    if rs is not None:
+        warnings.warn(
+            "calc_ffp_climatology(rs=...) is deprecated and has never had an "
+            "effect in this port; source areas moved to Footprint.contours().",
+            DeprecationWarning, stacklevel=2)
 
     #===========================================================================
-    # Define computational domain
-    # Check passed values and make some smart assumptions
-    if isinstance(dx, numbers.Number) and dy is None: dy = dx
-    if isinstance(dy, numbers.Number) and dx is None: dx = dy
-    if not all(isinstance(item, numbers.Number) for item in [dx, dy]): dx = dy = None
-    if isinstance(nx, int) and ny is None: ny = nx
-    if isinstance(ny, int) and nx is None: nx = ny
-    if not all(isinstance(item, int) for item in [nx, ny]): nx = ny = None
-    if not isinstance(domain, list) or len(domain) != 4: domain = None
-
-    if all(item is None for item in [dx, nx, domain]):
-        # If nothing is passed, default domain is a square of 2 Km size centered
-        # at the tower with pizel size of 2 meters (hence a 1000x1000 grid)
-        domain = [-1000., 1000., -1000., 1000.]
-        dx = dy = 2.
-        nx = ny = 1000
-    elif domain is not None:
-        # If domain is passed, it takes the precendence over anything else
-        if dx is not None:
-            # If dx/dy is passed, takes precendence over nx/ny
-            nx = int((domain[1]-domain[0]) / dx)
-            ny = int((domain[3]-domain[2]) / dy)
-        else:
-            # If dx/dy is not passed, use nx/ny (set to 1000 if not passed)
-            if nx is None: nx = ny = 1000
-            # If dx/dy is not passed, use nx/ny
-            dx = (domain[1]-domain[0]) / float(nx)
-            dy = (domain[3]-domain[2]) / float(ny)
-    elif dx is not None and nx is not None:
-        # If domain is not passed but dx/dy and nx/ny are, define domain
-        domain = [-nx*dx/2, nx*dx/2, -ny*dy/2, ny*dy/2]
-    elif dx is not None:
-        # If domain is not passed but dx/dy is, define domain and nx/ny
-        domain = [-1000, 1000, -1000, 1000]
-        nx = int((domain[1]-domain[0]) / dx)
-        ny = int((domain[3]-domain[2]) / dy)
-    elif nx is not None:
-        # If domain and dx/dy are not passed but nx/ny is, define domain and dx/dy
-        domain = [-1000, 1000, -1000, 1000]
-        dx = (domain[1]-domain[0]) / float(nx)
-        dy = (domain[3]-domain[2]) / float(nx)
-
-    # Put domain into more convenient vars
-    xmin, xmax, ymin, ymax = domain
+    # Input check (hoisted verbatim into fluxprint.model.engine)
+    inputs = engine.normalize_inputs(
+        zm=zm, ustar=ustar, pblh=pblh, mo_length=mo_length, v_sigma=v_sigma,
+        wind_dir=wind_dir, z0=z0, umean=umean, verbosity=verbosity)
 
     # Define rslayer if not passed
     if rslayer is None: rslayer = 0
@@ -198,195 +204,21 @@ def calc_ffp_climatology(zm=None, z0=None, umean=None, pblh=None, mo_length=None
     # Define smooth_data if not passed
     if smooth_data is None: smooth_data = 1
 
-    # Define crop if not passed
-    if crop is None: crop = 0
-
-    # Define pulse if not passed
-    if pulse == None:
-        if ts_len <= 20:
-            pulse = 1
-        else:
-            pulse = int(ts_len / 20)
-
     #===========================================================================
-    # Model parameters
-    a = 1.4524
-    b = -1.9914
-    c = 1.4622
-    d = 0.1359
-    ac = 2.17
-    bc = 1.66
-    cc = 20.0
-        
-    oln = 5000 #limit to L for neutral scaling
-    k = 0.4 #von Karman
+    # Computational domain (fluxprint.grid: the reference's reconciliation
+    # rules, verbatim); the per-record physics is _kljun_record, driven by
+    # the model-agnostic engine loop.
+    ctx = GridContext(resolve_grid(domain=domain, dx=dx, dy=dy, nx=nx, ny=ny))
+    result = engine.run_climatology(
+        _kljun_record, ctx=ctx, inputs=inputs, opts={"rslayer": rslayer},
+        validate=engine.ffp_validate, smooth_data=smooth_data, pulse=pulse,
+        verbosity=verbosity)
 
-    #===========================================================================
-    # Define physical domain in cartesian and polar coordinates
-    # Cartesian coordinates
-    x = np.linspace(xmin, xmax, nx + 1)
-    y = np.linspace(ymin, ymax, ny + 1)
-    x_2d, y_2d = np.meshgrid(x, y)
-
-    # Polar coordinates
-    # Set theta such that North is pointing upwards and angles increase clockwise
-    rho = np.sqrt(x_2d**2 + y_2d**2)
-    theta = np.arctan2(x_2d, y_2d)
-
-    # initialize raster for footprint climatology
-    fclim_2d = np.zeros(x_2d.shape)
-
-    #===========================================================================
-    # Loop on time series
-
-    # Initialize logic array valids to those 'timestamps' for which all inputs are
-    # at least present (but not necessarily phisically plausible)
-    valids = [True if not any([val is None for val in vals]) else False \
-              for vals in zip(ustars, sigmavs, hs, ols, wind_dirs, zms)]
-
-    # if verbosity > 1: logger.info('')
-    for ix, (ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean) \
-            in enumerate(zip(ustars, sigmavs, hs, ols, wind_dirs, zms, z0s, umeans)):
-
-        # Counter
-        if verbosity > 1 and ix % pulse == 0:
-            logger.info('Calculating footprint %d of %d', ix + 1, ts_len)
-
-        valids[ix] = check_ffp_inputs(ustar, v_sigma, pblh, mo_length, wind_dir, zm, z0, umean, rslayer, verbosity)
-
-        # If inputs are not valid, skip current footprint
-        if not valids[ix]:
-            raise_ffp_exception(16, verbosity)
-        else:
-            #===========================================================================
-            # Rotate coordinates into wind direction
-            if wind_dir is not None:
-                rotated_theta = theta - wind_dir * np.pi / 180.
-
-            #===========================================================================
-            # Create real scale crosswind integrated footprint and dummy for
-            # rotated scaled footprint
-            fstar_ci_dummy = np.zeros(x_2d.shape)
-            f_ci_dummy = np.zeros(x_2d.shape)
-            xstar_ci_dummy = np.zeros(x_2d.shape)
-            px = np.ones(x_2d.shape)
-            if z0 is not None:
-                # Use z0
-                if mo_length <= 0 or mo_length >= oln:
-                    xx = (1 - 19.0 * zm/mo_length)**0.25
-                    psi_f = (np.log((1 + xx**2) / 2.) + 2. * np.log((1 + xx) / 2.) - 2. * np.arctan(xx) + np.pi/2)
-                elif mo_length > 0 and mo_length < oln:
-                    psi_f = -5.3 * zm / mo_length
-                if (np.log(zm / z0)-psi_f)>0:
-                    xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
-                    px = np.where(xstar_ci_dummy > d)
-                    fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
-                    f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (np.log(zm / z0) - psi_f))
-                else:
-                    flag_err = 3
-                    valids[ix] = 0
-            else:
-                # Use umean if z0 not available
-                xstar_ci_dummy = (rho * np.cos(rotated_theta) / zm * (1. - (zm / pblh)) / (umean / ustar * k))
-                px = np.where(xstar_ci_dummy > d)
-                fstar_ci_dummy[px] = a * (xstar_ci_dummy[px] - d)**b * np.exp(-c / (xstar_ci_dummy[px] - d))
-                f_ci_dummy[px] = (fstar_ci_dummy[px] / zm * (1. - (zm / pblh)) / (umean / ustar * k))
-
-            #===========================================================================
-            # Calculate dummy for scaled sig_y* and real scale sig_y
-            sigystar_dummy = np.zeros(x_2d.shape)
-            sigystar_dummy[px] = (ac * np.sqrt(bc * np.abs(xstar_ci_dummy[px])**2 / (1 +
-                                  cc * np.abs(xstar_ci_dummy[px]))))
-
-            if abs(mo_length) > oln:
-                mo_length = -1E6
-            if mo_length <= 0:   #convective
-                scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.80
-            elif mo_length > 0:  #stable
-                scale_const = 1E-5 * abs(zm / mo_length)**(-1) + 0.55
-            if scale_const > 1:
-                scale_const = 1.0
-
-            sigy_dummy = np.zeros(x_2d.shape)
-            sigy_dummy[px] = (sigystar_dummy[px] / scale_const * zm * v_sigma / ustar)
-            sigy_dummy[sigy_dummy < 0] = np.nan
-
-            #===========================================================================
-            # Calculate real scale f(x,y)
-            f_2d = np.zeros(x_2d.shape)
-            f_2d[px] = (f_ci_dummy[px] / (np.sqrt(2 * np.pi) * sigy_dummy[px]) *
-                        np.exp(-(rho[px] * np.sin(rotated_theta[px]))**2 / ( 2. * sigy_dummy[px]**2)))
-
-            #===========================================================================
-            # Add to footprint climatology raster
-            fclim_2d = fclim_2d + f_2d
-
-    #===========================================================================
-    # Continue if at least one valid footprint was calculated
-    n = sum(valids)
-    clevs = None
-    if n==0:
-        logger.error("No footprint calculated")
-        flag_err = 1
-    else:
-        logger.info(f"{n} footprint calculated")
-        #===========================================================================
-        # Normalize and smooth footprint climatology
-        fclim_2d = fclim_2d / n
-
-        # Truthiness, not `is not None`: smooth_data=0 must actually disable
-        # smoothing as documented (it used to smooth anyway).
-        if smooth_data:
-            # np.matrix is pending removal from numpy; same kernel values.
-            skernel  = np.array([[0.05, 0.1, 0.05],
-                                 [0.10, 0.4, 0.10],
-                                 [0.05, 0.1, 0.05]])
-            fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
-            fclim_2d = sg.convolve2d(fclim_2d,skernel,mode='same')
-
-        #===========================================================================
-        # Crop domain and footprint to the largest rs value
-        if crop:
-            # Deferred: utils pulls the heavy geo/plotting stack at import.
-            from ..utils import get_contour_levels, get_contour_vertices
-            rs_dummy = 0.8  # crop to 80%
-            clevs = get_contour_levels(fclim_2d, dx, dy, rs_dummy)
-            xrs = []
-            yrs = []
-            xrs, yrs = get_contour_vertices(x_2d, y_2d, fclim_2d, clevs[0][2])
-
-            xrs_crop = [x for x in xrs if x is not None]
-            yrs_crop = [x for x in yrs if x is not None]
-
-            dminx = np.floor(min(xrs_crop[-1]))
-            dmaxx = np.ceil(max(xrs_crop[-1]))
-            dminy = np.floor(min(yrs_crop[-1]))
-            dmaxy = np.ceil(max(yrs_crop[-1]))
-                
-            if dminy>=ymin and dmaxy<=ymax:
-                jrange = np.where((y_2d[:,0] >= dminy) & (y_2d[:,0] <= dmaxy))[0]
-                jrange = np.concatenate(([jrange[0]-1], jrange, [jrange[-1]+1]))
-                jrange = jrange[np.where((jrange>=0) & (jrange<=y_2d.shape[0]))[0]]
-            else:
-                jrange = np.linspace(0, 1, y_2d.shape[0]-1)
-                        
-            if dminx>=xmin and dmaxx<=xmax:
-                irange = np.where((x_2d[0,:] >= dminx) & (x_2d[0,:] <= dmaxx))[0]
-                irange = np.concatenate(([irange[0]-1], irange, [irange[-1]+1]))
-                irange = irange[np.where((irange>=0) & (irange<=x_2d.shape[1]))[0]]
-            else:
-                irange = np.linspace(0, 1, x_2d.shape[1]-1)
-
-            jrange = [[it] for it in jrange]
-            x_2d = x_2d[jrange,irange]
-            y_2d = y_2d[jrange,irange]
-            fclim_2d = fclim_2d[jrange,irange]
-
-            
     #===========================================================================
     # Fill output structure
-    return type('var_', (object,), {'x_2d': x_2d, 'y_2d': y_2d, 'fclim_2d': fclim_2d,
-                'n': n, 'flag_err': flag_err})
+    return type('var_', (object,), {'x_2d': ctx.x_2d, 'y_2d': ctx.y_2d,
+                'fclim_2d': result.fclim_2d,
+                'n': result.n, 'flag_err': result.flag_err})
 
 
 def calc_footprint_1d(zm=None, z0=None, umean=None, pblh=None, mo_length=None, v_sigma=None, ustar=None,
@@ -581,19 +413,21 @@ MODEL_META = {
 }
 
 
-@register_model("kljun2015",
-                description="Kljun et al. (2015) FFP parameterisation",
-                **MODEL_META)
-def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
-         domain=None, dx=None, dy=None, nx=None, ny=None, rslayer=0,
-         smooth_data=1, tower=None, tower_crs=None, time=None, verbosity=0,
-         **kwargs) -> Footprint:
-    """Kljun et al. (2015) footprint as a :class:`~fluxprint.footprint.Footprint`.
+#: The registered model is the generic pipeline wrapped around _kljun_record —
+#: only the kernel (and the constants inside it) is Kljun physics. The
+#: decorator supplies the canonical signature, the driver, provenance, and the
+#: kernel-protocol attributes (.kernel/.resolve_grid/.validate/...).
+calc = engine.footprint_model(
+    "kljun2015", description="Kljun et al. (2015) FFP parameterisation",
+    meta=MODEL_META, options=("rslayer",), defaults={"rslayer": 0},
+    log=logger)(_kljun_record)
 
-    Thin wrapper over :func:`calc_ffp_climatology`. Accepts scalars (one record)
-    or equal-length sequences (composited into one footprint) and returns the
-    result on the model's regular grid in the local tower-centred frame. Provide
-    ``wind_dir`` for a north-up (geographically oriented) grid.
+calc.__doc__ = """Kljun et al. (2015) footprint as a :class:`~fluxprint.footprint.Footprint`.
+
+    Accepts scalars (one record) or equal-length sequences (composited into
+    one footprint) and returns the result on the model's regular grid in the
+    local tower-centred frame. Provide ``wind_dir`` for a north-up
+    (geographically oriented) grid.
 
     Args:
         zm: Measurement height above displacement [m].
@@ -608,60 +442,14 @@ def calc(*, zm, ustar, pblh, mo_length, v_sigma, wind_dir, z0=None, umean=None,
         dx, dy: Grid spacing [m].
         nx, ny: Grid element counts (alternative to ``dx``/``dy``).
         rslayer: Set ``1`` to compute even within the roughness sublayer.
-        smooth_data: Apply the standard smoothing kernel (``1``) or not (``0``).
+        smooth: Apply the standard smoothing kernel (generic spelling; wins
+            over ``smooth_data`` when both are given). Default on.
+        smooth_data: FFP-compatible spelling of ``smooth`` (kept for
+            downstream integrations).
         tower, tower_crs, time: Metadata attached to the returned footprint.
-        verbosity: Passed through to the underlying routine.
+        verbosity: 2 logs progress, 1 only fatal problems, 0 silent.
 
     Returns:
         A local-frame :class:`~fluxprint.footprint.Footprint` (``n`` = records
         composited; ``attrs["flag_err"]`` carries the model error flag).
     """
-    def _listify(value):
-        # calc_ffp_climatology wraps non-lists as a single element, so arrays /
-        # tuples / Series must be converted to a list; scalars pass through.
-        if value is None or isinstance(value, (int, float, list)):
-            return value
-        return list(value)
-
-    out = calc_ffp_climatology(
-        zm=_listify(zm), z0=_listify(z0), umean=_listify(umean),
-        ustar=_listify(ustar), pblh=_listify(pblh),
-        mo_length=_listify(mo_length), v_sigma=_listify(v_sigma),
-        wind_dir=_listify(wind_dir), domain=domain, dx=dx, dy=dy, nx=nx, ny=ny,
-        rslayer=rslayer, smooth_data=smooth_data, crop=0, verbosity=verbosity)
-
-    from datetime import datetime as _dt, timezone as _tz
-    from ..version import __version__ as _fluxprint_version
-
-    x = np.asarray(out.x_2d)[0, :]
-    y = np.asarray(out.y_2d)[:, 0]
-    # Provenance: enough metadata to trace a stored footprint back to the
-    # code, model and settings that produced it.
-    attrs = {
-        "model": "kljun2015",
-        "flag_err": int(out.flag_err),
-        **MODEL_META,
-        "fluxprint_version": _fluxprint_version,
-        "wind_profile_input": "umean" if z0 is None else "z0",
-        "rslayer": int(rslayer),
-        "smooth_data": int(bool(smooth_data)),
-        "history": (f"{_dt.now(_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                    f"created by fluxprint {_fluxprint_version}, "
-                    "model kljun2015"),
-    }
-    fp = Footprint(
-        f=np.asarray(out.fclim_2d), x=x, y=y, time=time,
-        tower=tower, tower_crs=tower_crs, n=int(out.n), attrs=attrs)
-    if fp.n:
-        # The grid integral of the full footprint is 1 by construction, so the
-        # captured fraction diagnoses how much flux the domain truncates. It is
-        # computed on the returned field, so with smooth_data=1 it also
-        # includes the ~1% border mass the smoothing kernel loses.
-        captured = fp.total()
-        fp.attrs["captured_fraction"] = float(captured)
-        if captured < 0.8:
-            logger.warning(
-                "Footprint domain captures only %.0f%% of the flux; source-"
-                "area fractions above that are unreachable. Enlarge `domain` "
-                "(or reduce `dx`) to capture more.", captured * 100)
-    return fp

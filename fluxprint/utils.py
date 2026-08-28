@@ -10,16 +10,26 @@ import xarray as xr
 from pyproj import Transformer  # for coordinate transformations
 import rasterio
 import matplotlib.pyplot as plt
-from scipy import signal as sg
 
 # local modules
 from .commons import update_nested_dict
-from .template import DEFAULT_ATTRS
+from .template import _DEFAULT_ATTRS as DEFAULT_ATTRS
 
 logger = logging.getLogger('fluxprint.utils')
 
+
+def _warn_deprecated(name, instead=None):
+    """One-line deprecation notice for the legacy helpers in this module."""
+    msg = (f"fluxprint.utils.{name} is deprecated and will be removed in a "
+           "future release")
+    if instead:
+        msg += f"; use {instead} instead"
+    warnings.warn(msg + ".", DeprecationWarning, stacklevel=3)
+
+
 class structuredData:
     def __init__(self, **kwargs):
+        _warn_deprecated("structuredData", "fluxprint.Footprint")
         for k, v in kwargs.items():
             self.__dict__[k] = v
         pass
@@ -74,15 +84,6 @@ def convert_to_object(data, name=None):
             'y_2d': y
         }
         return type('var_', (object,), footprint)
-
-        # Convert rasterio DatasetReader to dictionary
-        footprint = {'fclim_2d': data.read()[0]}
-        x = np.linspace(data.bounds[0], data.bounds[2],
-                        footprint['fclim_2d'].shape[0])
-        y = np.linspace(data.bounds[1], data.bounds[3],
-                        footprint['fclim_2d'].shape[1])
-        footprint["x_2d"], footprint["y_2d"] = np.meshgrid(x, y)
-        return {name: footprint}
     else:
         raise ValueError(
             "Data must be a netcdf (xr array) or a rasterio Dataset.")
@@ -167,30 +168,29 @@ def convert_to_tif(data, anchor='top-left', **attrs):
         raise TypeError(
             "Data must be an xarray Dataset, a rasterio dataset, or a footprint "
             f"object with an `fclim_2d` attribute; got {type(data).__name__}.")
-    return
 
 
 # utils.py
 def is_footprint_dict(d):
+    _warn_deprecated("is_footprint_dict")
     return ('fclim_2d' in d) or (len(d.keys()) and 'fclim_2d' in d[list(d.keys())[0]])
 
-
-def find_utm_epsg_from_lon_deprecated(lon: float, lat: float = None):
-    utm_band = str(int(np.floor((lon + 180) / 6) % 60))
-    epsg_code = "EPSG:327" + utm_band.zfill(2)
-    return epsg_code
 
 def find_peak(array):
     return np.unravel_index(array.argmax(), array.shape)
 
 
 def smooth_data(data):
-    skernel = np.matrix('0.05 0.1 0.05; 0.1 0.4 0.1; 0.05 0.1 0.05')
-    data = sg.convolve2d(data, skernel, mode='same')
-    data = sg.convolve2d(data, skernel, mode='same')
-    return data
+    """Deprecated alias of :func:`fluxprint.footprint.smooth_field`."""
+    warnings.warn(
+        "fluxprint.utils.smooth_data is deprecated and will be removed in a "
+        "future release; use fluxprint.footprint.smooth_field() instead.",
+        DeprecationWarning, stacklevel=2)
+    from .footprint import smooth_field
+    return smooth_field(data)
 
 def transform_crs(*xy, crs_in="EPSG:4326", crs_out="EPSG:3035"):
+    _warn_deprecated("transform_crs", "fluxprint.utils.transform_coordinates")
     transformer = Transformer.from_crs(crs_in, crs_out)
     return transformer.transform(*xy)
 
@@ -205,6 +205,7 @@ def find_utm_epsg_from_lon(lon: float, lat: float = None) -> str:
     Returns:
         str: UTM EPSG code (e.g., "EPSG:32612" for UTM zone 12N).
     """
+    _warn_deprecated("find_utm_epsg_from_lon")
     # Calculate UTM zone number
     utm_zone = int(np.floor((lon + 180) / 6) + 1)
 
@@ -217,6 +218,7 @@ def find_utm_epsg_from_lon(lon: float, lat: float = None) -> str:
 
 
 def update_affine(src, a=0, b=0, c=0, d=0, e=0, f=0):
+    _warn_deprecated("update_affine")
     # Get the affine transformation matrix
     transform = src.transform
 
@@ -343,6 +345,7 @@ def transformer_convention(data, convention, anchor, convention_from: str = None
 
 
 def find_middle_point(bounds):
+    _warn_deprecated("find_middle_point")
     # Get the bounding box
     min_x, min_y, max_x, max_y = bounds.left, bounds.bottom, bounds.right, bounds.top
 
@@ -379,6 +382,7 @@ def affine_conventions(x, y, dx, dy, anchor='top-left', convention='(lat,lon)'):
 
 
 def identify_convention(affine_matrix, dx, dy, min_x, max_x, min_y, max_y):
+    _warn_deprecated("identify_convention")
     a, b, xoff, d, e, yoff = affine_matrix[:6]
 
     if a == dx and e == -dy and xoff == min_x and yoff == max_y:
@@ -486,6 +490,7 @@ def transform_coordinates(*args, crs_in="EPSG:4326", crs_out="EPSG:3035"):
 
 
 def attribute_crs(data, crs="EPSG:3035"):
+    _warn_deprecated("attribute_crs")
     if isinstance(data, (xr.Dataset, xr.DataArray)):
         crs = rasterio.crs.CRS.from_string(crs)
         new_attrs = {'__global__': {'Coordinate_Reference_System': crs.to_string(),
@@ -506,6 +511,7 @@ def extract_crs(nc, str:bool=False):
 
 
 def reproject_tif(src, crs):
+    _warn_deprecated("reproject_tif")
     from rasterio.warp import calculate_default_transform, reproject, Resampling
     transform, width, height = calculate_default_transform(
         src.crs, crs, src.width, src.height, *src.bounds)
@@ -548,6 +554,8 @@ def get_contour_levels(f, dx, dy, rs=None):
     '''Contour levels of f at percentages of f-integral given by rs
     For original see Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid, 2015 (doi:10.5194/gmd-8-3695-2015)
     '''
+    _warn_deprecated("get_contour_levels",
+                     "Footprint.level_for() / Footprint.contours()")
     # Check input and resolve to default levels in needed
     if not isinstance(rs, (int, float, list)):
         rs = list(np.linspace(0.10, 0.90, 9))
@@ -577,6 +585,7 @@ def get_contour_vertices(x, y, f, lev):
     '''Contour vertices of f at percentages of f-integral given by rs
     For original see Kljun, N., P. Calanca, M.W. Rotach, H.P. Schmid, 2015 (doi:10.5194/gmd-8-3695-2015)
     '''
+    _warn_deprecated("get_contour_vertices", "Footprint.contours()")
     cs = plt.contour(x, y, f, [lev])
     plt.close()
     segs = cs.allsegs[0][0]
@@ -591,6 +600,7 @@ def get_contour_vertices(x, y, f, lev):
 
 
 def center_footprint(footprint, centre=None, center_previous=None):
+    _warn_deprecated("center_footprint", "Footprint.georeference()")
     def cy(x): return None if x is None else list(map(cy, x)) if (
         isinstance(x, list) or len(x.shape) > 1) else x + centre[0] - center_previous[0]
 
@@ -654,6 +664,7 @@ def center_footprint(footprint, centre=None, center_previous=None):
 def plot_footprint(x_2d, y_2d, fs, clevs=None, show_heatmap=True, normalize=None, 
                    colormap=None, line_width=0.5, iso_labels=None):
     '''Plot footprint function and contours if request'''
+    _warn_deprecated("plot_footprint", "Footprint.plot()")
 
     import numpy as np
     import matplotlib.pyplot as plt

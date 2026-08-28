@@ -8,7 +8,6 @@ from datetime import datetime
 # 3rd party modules
 import numpy as np
 import pandas as pd
-from scipy import signal as sg
 
 # local modules (deliberately light: the geo/plotting stack loads lazily via
 # `utils`/`io` function-level imports, so `import fluxprint` stays cheap)
@@ -19,6 +18,38 @@ from . import exceptions
 from . import micrometeorology
 
 logger = logging.getLogger('fluxprint.core')
+
+
+#: Alternative column names recognized by :func:`process_footprint_inputs`,
+#: keyed by canonical name. ``"model_inputs"`` are the met variables forwarded
+#: to the models; ``"drivers"`` are consumed only by the estimators (e.g. the
+#: Obukhov length from USTAR/H/TA/PA) and each entry lists every accepted
+#: spelling including the canonical one. Matching is case-insensitive except
+#: for ``'H'`` (sensible heat flux): FFP names the boundary-layer height with
+#: a lowercase ``'h'``, so ``'H'`` must match exactly.
+ALIASES = {
+    "model_inputs": {
+        "wind_dir": ("wd", "wind_direction"),
+        "v_sigma": ("sigmav", "v_sd", "sigma_v"),
+        "ustar": ("u*",),
+        "umean": ("ws", "ws_f", "wind_speed"),
+        "mo_length": ("ol", "l"),
+        "pblh": ("blh",),
+    },
+    "drivers": {
+        "H": ("H", "H_F"),
+        "TA": ("TA", "TA_F"),
+        "PA": ("PA", "PA_F"),
+        # Height metadata for zm = z - d (aerodynamic height).
+        "measurement_height": ("measurement_height", "sensor_height",
+                               "instrument_height"),
+        "canopy_height": ("canopy_height", "vegetation_height", "hc"),
+        "displacement": ("displacement", "displacement_height", "zd"),
+    },
+}
+
+#: Driver keys matched case-sensitively (see :data:`ALIASES`).
+_CASE_SENSITIVE_DRIVERS = frozenset({"H"})
 
 
 class _ProcessedInputs(dict):
@@ -57,54 +88,31 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     # Define the required keys
     required_keys = ['zm', 'z0', 'umean', 'ustar',
                      'pblh', 'mo_length', 'v_sigma', 'wind_dir'] + keep_cols
-    aka_keys = {'wind_dir': ['wd', 'wind_direction'],
-                'v_sigma': ['sigmav', 'v_sd', 'sigma_v'],
-                'ustar': ['u*'],
-                'umean': ['ws', 'ws_f', 'wind_speed'],
-                'mo_length': ['ol', 'l'],
-                'pblh': ['blh']}
-    core_keys = ['zm', 'wind_dir']
+    aka_keys = ALIASES["model_inputs"]
     optional_keys = ['z0', 'umean'] + keep_cols
-    # optional_keys = [] + keep_cols
-
 
     # If data is provided, extract values from the DataFrame
     if data is not None and isinstance(data, pd.DataFrame):
         # Drop full nan columns
         data = data.dropna(axis=1, how='all')
 
-        if not isinstance(data, pd.DataFrame):
-            raise ValueError("`data` must be a pandas DataFrame.")
-
-        # Use regex to match column names case-insensitively
+        # One scan per variable: the canonical name first, then each alias
+        # from ALIASES["model_inputs"] in declared order; per candidate an
+        # exact column match beats a case-insensitive one, and the first hit
+        # wins (the same resolution order map_footprints uses).
         inputs = {}
         for key in required_keys:
-            # Create a regex pattern to match the key case-insensitively
-            pattern = re.compile(f'^{re.escape(key)}$', re.IGNORECASE)
-            # Find matching columns in the DataFrame, prioritizing exact matches
-            matching_columns = [col for col in data.columns if col == key] + [
-                col for col in data.columns if pattern.match(col)]
-            
-            if matching_columns:
-                logger.debug(f'matching_columns: {matching_columns}')
-                # Use the first matching column
-                inputs[key] = data[matching_columns[0]].tolist()
-
-        # Use other names variables may be known for (e.g. wind direction, wind_dir, wd)
-        for key in required_keys:
-            for aka in aka_keys.get(key, []):
-                # Escape the alias: 'u*' must match the literal column name,
-                # not act as a quantifier (which would also swallow a plain
-                # 'U'/'u' wind-component column as friction velocity).
-                pattern = re.compile(f'^{re.escape(aka)}$', re.IGNORECASE)
-                # Find matching columns in the DataFrame, prioritizing exact matches
-                matching_columns = [col for col in data.columns if col == key] + [
-                    col for col in data.columns if pattern.match(col)]
-
-                # if aka in data.columns:
+            for cand in (key, *aka_keys.get(key, ())):
+                # Escape the candidate: 'u*' must match the literal column
+                # name, not act as a quantifier (which would also swallow a
+                # plain 'U'/'u' wind-component column as friction velocity).
+                pattern = re.compile(f'^{re.escape(cand)}$', re.IGNORECASE)
+                matching_columns = [c for c in data.columns if c == cand] + [
+                    c for c in data.columns if pattern.match(c)]
                 if matching_columns:
-                    logger.debug(f'aka: {matching_columns[0]}')
-                    inputs[key] = data[matching_columns[0]]
+                    logger.debug('%s <- column %r', key, matching_columns[0])
+                    inputs[key] = data[matching_columns[0]].tolist()
+                    break
 
         # Check if the key is provided as a keyword argument
         for key in required_keys:
@@ -117,18 +125,8 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
         # models. 'H' (sensible heat flux, W m-2) is matched case-sensitively
         # so a lowercase 'h' column (FFP's name for the boundary-layer height)
         # is never mistaken for it. TA is degC, PA is kPa.
-        for key, aliases, exact in (
-                ('H', ['H', 'H_F'], True),
-                ('TA', ['TA', 'TA_F'], False),
-                ('PA', ['PA', 'PA_F'], False),
-                # Height metadata for zm = z - d (aerodynamic height).
-                ('measurement_height',
-                 ['measurement_height', 'sensor_height', 'instrument_height'],
-                 False),
-                ('canopy_height',
-                 ['canopy_height', 'vegetation_height', 'hc'], False),
-                ('displacement',
-                 ['displacement', 'displacement_height', 'zd'], False)):
+        for key, aliases in ALIASES["drivers"].items():
+            exact = key in _CASE_SENSITIVE_DRIVERS
             # An explicit None kwarg means "not available": fall through to
             # the column scan instead of feeding None to the estimators.
             if kwargs.get(key) is not None:
@@ -148,11 +146,20 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
     elif data is not None and isinstance(data, dict):
         # If DataFrame provided is a dict like kwargs
         data = {k: v for k, v in data.items() if v not in (None, '', [], {}, ())}
-        
+
         inputs = data
         inputs.update(kwargs)
+    elif data is not None:
+        # Previously any other container fell through to kwargs-only inputs and
+        # failed later with a confusing "missing inputs" error (or silently
+        # computed from kwargs alone).
+        raise TypeError(
+            f"Unsupported `data` container: {type(data).__name__}. Supported: "
+            "a pandas DataFrame or a dict of equal-length sequences "
+            "(calculate_footprint additionally accepts a URL string). For an "
+            "xarray.Dataset, pass dict(ds.data_vars) or ds.to_dataframe().")
     else:
-        # If no DataFrame is provided, use kwargs
+        # If no data is provided, use kwargs
         inputs = kwargs
 
     # Estimate missing inputs when enabled, in dependency order (mo_length
@@ -170,9 +177,10 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
                 inputs[key] = value
                 estimated.append(key)
 
-    # Core inputs are mandatory (after any estimation), and the models need
-    # either z0 or umean (z0 takes precedence when both are present).
-    missing_keys = [key for key in core_keys if inputs.get(key) is None]
+    # Required (non-optional) inputs must be present after estimation, and
+    # the models need either z0 or umean (z0 wins when both are given).
+    missing_keys = [key for key in required_keys
+                    if key not in optional_keys and inputs.get(key) is None]
     if inputs.get('z0') is None and inputs.get('umean') is None:
         missing_keys.append('z0 or umean')
     if missing_keys:
@@ -181,15 +189,6 @@ def process_footprint_inputs(data=None, keep_cols=[], estimate_missing_variables
             f"approximation (estimate_missing_variables=True; set fill_all=True "
             f"for crude constant fallbacks).")
 
-    # Remaining required (non-optional) inputs must also be present.
-    missing_keys = [key for key in required_keys
-                    if key not in optional_keys and inputs.get(key) is None]
-    if missing_keys:
-        raise ValueError(
-            f"Missing required inputs: {missing_keys}. Provide them, or enable "
-            f"approximation (estimate_missing_variables=True; set fill_all=True "
-            f"for crude constant fallbacks).")
-    
     # Get the maximum length of the inputs
     max_len_inputs = max(len(v) if isinstance(
         v, (list, np.ndarray)) else 1 for v in inputs.values())
@@ -239,14 +238,18 @@ def _group_label(key):
 
 
 #: Inputs forwarded to a model's ``calc`` (met. variables + grid options).
+#: ``smooth`` and ``smooth_data`` are two spellings of one knob (``smooth``
+#: is generic and wins; ``smooth_data`` is FFP-compatible and pinned by
+#: downstream integrations).
 _MODEL_KEYS = frozenset({
     "zm", "z0", "umean", "ustar", "pblh", "mo_length", "v_sigma", "wind_dir",
-    "domain", "dx", "dy", "nx", "ny", "rslayer", "smooth_data", "verbosity",
+    "domain", "dx", "dy", "nx", "ny", "rslayer", "smooth", "smooth_data",
+    "verbosity",
 })
 
 
 def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
-                        tower=None, tower_crs=None, **kwargs):
+                        tower=None, tower_crs=None, on_error="skip", **kwargs):
     """Compute footprints from tabular inputs as a :class:`FootprintSeries`.
 
     Rows are grouped by ``by`` (one composited footprint per group) and each
@@ -261,6 +264,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     Any estimated inputs are recorded in each footprint's
     ``attrs["estimated_inputs"]``.
 
+    A :class:`FootprintSeries` is eager (one in-memory field per group) and
+    suited to grouped climatologies — tens to hundreds of members. For one
+    footprint per *record* over long records (e.g. years of half-hours),
+    use :func:`fluxprint.map_footprints` instead: it maps the model lazily
+    over dask-chunked arrays and never materializes the whole stack.
+
     Args:
         data: A DataFrame, a dict of equal-length sequences, or a URL string.
         by: Column name (or list of names) to group rows by; ``None`` for one group.
@@ -270,6 +279,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
         tower: ``(x, y)`` tower position, attached to each footprint for
             later georeferencing.
         tower_crs: CRS of ``tower``.
+        on_error: What to do when a group fails (the model raises, or no
+            record in the group is valid): ``"skip"`` (default) drops the
+            group with a logged warning; ``"raise"`` aborts on the first
+            failure; ``"nan"`` keeps the group's slot as an all-NaN
+            footprint on the model grid, with the reason in
+            ``attrs["error"]`` — so a long batch keeps one member per group.
         **kwargs: Model inputs / grid options (e.g. ``domain``, ``dx``, ``zm``)
             and per-call overrides.
 
@@ -279,6 +294,9 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     Raises:
         ValueError: If no footprint could be calculated from the data.
     """
+    if on_error not in ("skip", "raise", "nan"):
+        raise ValueError(
+            f"on_error must be 'skip', 'raise' or 'nan'; got {on_error!r}.")
     model_fn = _resolve_model(model)
 
     if isinstance(data, str):
@@ -306,26 +324,50 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
 
     footprints: list[Footprint] = []
     skipped = 0
+    nan_template = None
     for key, group in grouped:
         if isinstance(group, pd.DataFrame):
             group = group.to_dict(orient="list")
         time, label = _group_label(key)
         call = {**grid_defaults, **overrides,
                 **{k: v for k, v in group.items() if k in _MODEL_KEYS}}
+        failure = None
         try:
             fp = model_fn(tower=tower, tower_crs=tower_crs, time=time, **call)
         except Exception as exc:
-            # A failed group is skipped, never silently backfilled with another
-            # group's footprint. Re-raise instead of `continue` to abort instead.
+            # A failed group is never silently backfilled with another
+            # group's footprint: it is skipped, kept as NaN, or aborts,
+            # depending on on_error.
+            if on_error == "raise":
+                raise
             logger.debug("Traceback for failed group %r:", key, exc_info=True)
-            logger.warning("Footprint failed for group %r (%s); skipping.",
-                           key, exc)
-            skipped += 1
-            continue
-        if getattr(fp, "n", None) == 0:
-            logger.warning("Group %r had no valid records; skipping.", key)
-            skipped += 1
-            continue
+            logger.warning("Footprint failed for group %r (%s).", key, exc)
+            failure = str(exc) or type(exc).__name__
+        else:
+            if getattr(fp, "n", None) == 0:
+                if on_error == "raise":
+                    raise ValueError(
+                        f"Group {key!r} produced no valid records "
+                        "(on_error='raise').")
+                logger.warning("Group %r had no valid records.", key)
+                failure = "no valid records in group"
+        if failure is not None:
+            if on_error != "nan":
+                skipped += 1
+                continue
+            if nan_template is None:
+                # Grid-only, microseconds; the grid is invariant across
+                # groups (FootprintSeries enforces it regardless).
+                nan_template = empty_footprint(
+                    model=model_fn,
+                    **{k: call[k] for k in ("domain", "dx", "dy", "nx", "ny")
+                       if call.get(k) is not None})
+            # Each slot gets its own field array: _replace shares arrays, and
+            # a series of NaN slots aliasing one buffer would let an in-place
+            # edit of one member silently rewrite all of them.
+            fp = nan_template._replace(f=nan_template.f.copy(), time=time,
+                                       n=0, tower=tower, tower_crs=tower_crs)
+            fp.attrs["error"] = failure
         if label is not None:
             if isinstance(label, (pd.Timestamp, datetime)):
                 # Keep attrs NetCDF-serializable: a raw Timestamp in attrs
@@ -349,36 +391,39 @@ def empty_footprint(model="kljun2015", *, domain=None, dx=None, dy=None,
                     **kwargs) -> Footprint:
     """Return an empty (NaN) Footprint matching the model's grid.
 
-    Runs the selected model once with placeholder inputs to obtain the exact
-    grid it would produce for ``domain``/``dx``/``dy``, then blanks the field.
-    Useful as a template (to pre-allocate, or to report the output shape)
-    without computing a real footprint. Call ``.to_xarray()`` on the result for
-    an empty DataArray/Dataset.
+    This is the template API: it resolves the exact grid the model would
+    produce for ``domain``/``dx``/``dy``/``nx``/``ny`` — via the model's
+    ``resolve_grid`` hook (:func:`fluxprint.grid.resolve_grid` by default) —
+    without running the model, so it costs microseconds. Useful to
+    pre-allocate, or to know the output shape/coordinates in advance. Call
+    ``.to_xarray()`` on the result for an empty DataArray/Dataset.
 
     Args:
         model: Registered model name or a FootprintModel callable.
-        domain: ``[xmin, xmax, ymin, ymax]`` in metres (model default if None).
-        dx, dy: Grid spacing in metres.
-        **kwargs: Other grid options forwarded to the model (e.g. ``nx``/``ny``).
+        domain: ``[xmin, xmax, ymin, ymax]`` in metres (defaults to the batch
+            default, a tower-centred 1 km box).
+        dx, dy: Grid spacing in metres (``dx`` defaults to 10).
+        **kwargs: Other grid options (``nx``/``ny``).
 
     Returns:
         Footprint: The grid/coords of a real footprint, with ``f`` all NaN.
     """
+    from . import grid as _grid
+
     model_fn = _resolve_model(model)
-    grid = {"domain": domain if domain is not None else [-500, 500, -500, 500],
-            "dx": dx if dx is not None else 10, "verbosity": 0}
+    spec_kwargs = {
+        "domain": domain if domain is not None else [-500, 500, -500, 500],
+        "dx": dx if dx is not None else 10,
+    }
     if dy is not None:
-        grid["dy"] = dy
-    grid.update({k: v for k, v in kwargs.items() if k in _MODEL_KEYS})
+        spec_kwargs["dy"] = dy
+    spec_kwargs.update({k: v for k, v in kwargs.items() if k in ("nx", "ny")})
 
-    # Safe placeholder met inputs: the grid is independent of their values, and
-    # these avoid tripping the model's input validation. Skip any already given.
-    placeholders = {"zm": 2.0, "umean": 2.0, "ustar": 0.3, "pblh": 1000.0,
-                    "mo_length": -100.0, "v_sigma": 0.5, "wind_dir": 0.0}
-    placeholders = {k: v for k, v in placeholders.items() if k not in grid}
-
-    fp = model_fn(**grid, **placeholders)
-    return fp._replace(f=np.full(fp.f.shape, np.nan, dtype=fp.f.dtype))
+    resolver = getattr(model_fn, "resolve_grid", _grid.resolve_grid)
+    spec = resolver(**spec_kwargs)
+    x, y = spec.axes()
+    attrs = {"model": model} if isinstance(model, str) else {}
+    return Footprint(f=np.full(spec.shape, np.nan), x=x, y=y, attrs=attrs)
 
 
 def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
@@ -425,59 +470,22 @@ def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
             if not result.is_georeferenced:
                 raise ValueError(
                     "Georeference the footprint before writing a TIFF: pass "
-                    "tower/tower_crs and call .georeference(target_crs).")
+                    "tower/tower_crs and capture the copy georeference() "
+                    "returns (fp = fp.georeference(target_crs)).")
             result.to_tiff(dst)
         else:
             raise ValueError(f"Unknown out_as={out_as!r}; use 'nc' or 'tif'.")
     return result
 
 
-def aggregate_footprints(fclim_2d, dx, dy, smooth_data=1):
-    """
-    Aggregate multiple footprints into a single climatological footprint.
-
-    .. deprecated:: 0.3
-        Use :meth:`FootprintSeries.aggregate` instead; this raw-array helper
-        will be removed in a future release.
-
-    Parameters:
-        footprints (list): List of footprint dictionaries.
-
-    Returns:
-        np.ndarray: Aggregated footprint.
-    """
-    warnings.warn(
-        "fluxprint.aggregate_footprints is deprecated and will be removed in "
-        "a future release; use FootprintSeries.aggregate() instead.",
-        DeprecationWarning, stacklevel=2)
-    fclim_2d = np.array(fclim_2d)
-    if len(fclim_2d.shape) == 2:
-        logger.info(
-            f"Footprint must be 3D (time, x, y), dimension passed was: {fclim_2d.shape}.")
-        return fclim_2d
-
-    assert len(
-        fclim_2d.shape) == 3, f"Footprint must be 3D (time, x, y), dimension passed was: {fclim_2d.shape}."
-    #n_valid = len(fclim_2d)
-
-    fclim_clim = np.nanmean(fclim_2d, axis=0)
-
-    # Truthiness, not `is not None`: smooth_data=0 must disable smoothing.
-    if smooth_data:
-        skernel = np.array([[0.05, 0.1, 0.05],
-                            [0.10, 0.4, 0.10],
-                            [0.05, 0.1, 0.05]])
-        fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
-        fclim_clim = sg.convolve2d(fclim_clim, skernel, mode='same')
-    return fclim_clim
-
-
 def get_contour(footprint, dx, dy, rs, verbosity=0):
     """Source-area contours of a legacy footprint object.
 
     .. deprecated:: 0.3
-        Use :meth:`Footprint.contours` instead; this helper will be removed
-        in a future release. A :class:`Footprint` argument is delegated there.
+        Use :meth:`Footprint.contours` instead. Removal is deferred to the
+        release that also removes the legacy ``io.write_*`` writers
+        (``write_to_shapefile``'s legacy-dict branch still calls this).
+        A :class:`Footprint` argument is delegated to ``contours()``.
     """
     warnings.warn(
         "fluxprint.get_contour is deprecated and will be removed in a future "
@@ -495,55 +503,50 @@ def get_contour(footprint, dx, dy, rs, verbosity=0):
     footprint = utils.convert_to_object(
         footprint)
 
-    # Handle rs
-    if rs is not None:
+    # Handle rs (guaranteed non-None here: the None case raised above)
+    # Check that rs is a list, otherwise make it a list
+    if isinstance(rs, numbers.Number):
+        if 0.9 < rs <= 1 or 90 < rs <= 100:
+            rs = 0.9
+        rs = [rs]
+    if not isinstance(rs, list):
+        exceptions.raise_ffp_exception(18, verbosity)
 
-        # Check that rs is a list, otherwise make it a list
-        if isinstance(rs, numbers.Number):
-            if 0.9 < rs <= 1 or 90 < rs <= 100:
-                rs = 0.9
-            rs = [rs]
-        if not isinstance(rs, list):
-            exceptions.raise_ffp_exception(18, verbosity)
+    # If rs is passed as percentages, normalize to fractions of one
+    if np.max(rs) >= 1:
+        rs = [x/100. for x in rs]
 
-        # If rs is passed as percentages, normalize to fractions of one
-        if np.max(rs) >= 1:
-            rs = [x/100. for x in rs]
+    # Eliminate any values beyond 0.9 (90%) and inform user
+    if np.max(rs) > 0.9:
+        exceptions.raise_ffp_exception(19, verbosity)
+        rs = [item for item in rs if item <= 0.9]
 
-        # Eliminate any values beyond 0.9 (90%) and inform user
-        if np.max(rs) > 0.9:
-            exceptions.raise_ffp_exception(19, verbosity)
-            rs = [item for item in rs if item <= 0.9]
+    # Sort levels in ascending order
+    rs = list(np.sort(rs))
 
-        # Sort levels in ascending order
-        rs = list(np.sort(rs))
+    # Derive footprint ellipsoid incorporating R% of the flux, starting at
+    # peak value.
+    clevs = utils.get_contour_levels(footprint.fclim_2d, dx, dy, rs)
+    frs = [item[2] for item in clevs]
+    xrs = []
+    yrs = []
+    for ix, fr in enumerate(frs):
+        xr, yr = utils.get_contour_vertices(
+            footprint.x_2d, footprint.y_2d, footprint.fclim_2d, fr)
+        if xr is None:
+            frs[ix] = None
+            flag_err = 2
+        xrs.append(xr)
+        yrs.append(yr)
 
-    # Derive footprint ellipsoid incorporating R% of the flux, if requested,
-    # starting at peak value.
-    if rs is not None:
-        clevs = utils.get_contour_levels(footprint.fclim_2d, dx, dy, rs)
-        frs = [item[2] for item in clevs]
-        xrs = []
-        yrs = []
-        for ix, fr in enumerate(frs):
-            xr, yr = utils.get_contour_vertices(
-                footprint.x_2d, footprint.y_2d, footprint.fclim_2d, fr)
-            if xr is None:
-                frs[ix] = None
-                flag_err = 2
-            xrs.append(xr)
-            yrs.append(yr)
-
-    # footprint.update({"xr": xrs, "yr": yrs, 'fr': frs, 'rs': rs})
-    # return footprint
     return type('var_', (object,), {"xr": xrs, "yr": yrs, 'fr': frs, 'rs': rs, 'flag_err': flag_err})
 
 
 __all__ = [
+    "ALIASES",
     "calculate_footprint",
     "empty_footprint",
     "process_footprint_inputs",
-    "aggregate_footprints",
     "get_contour",
     "wrapper",
 ]

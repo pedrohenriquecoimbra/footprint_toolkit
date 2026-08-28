@@ -102,6 +102,10 @@ step (CI-enforced).
   footprint-widening smoothing pass downstream.
 
 ### Changed
+- The `regorator` upper bound (`<0.3`) is dropped: fluxprint uses a
+  two-function surface that is stable across regorator releases, and an
+  upper cap on a library dependency only creates resolver conflicts
+  downstream. The floor stays at `>=0.2` (the version CI exercises).
 - `Footprint` construction now rejects descending or empty coordinate axes
   with an actionable error (flip north-first rasters before constructing);
   previously a descending axis silently flipped the sign of `dx`/`dy` and

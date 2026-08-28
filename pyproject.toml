@@ -35,7 +35,7 @@ dependencies = [
     "shapely",
     "fiona",
     "requests",
-    "regorator>=0.2,<0.3",
+    "regorator>=0.2",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

@@ -233,6 +233,85 @@ def test_series_aggregate_means_and_sums_counts():
     assert clim.is_climatology is True
 
 
+def test_series_aggregate_matches_nanmean_with_nan_members():
+    # The incremental accumulator must reproduce nanmean semantics: NaN
+    # holes ignored per cell, all-NaN cells staying NaN.
+    rng = np.random.default_rng(1)
+    fields = [rng.random((4, 4)) for _ in range(3)]
+    fields[0][0, 0] = np.nan               # a hole in one member
+    fields[1][:] = np.nan                  # an all-NaN slot (on_error="nan")
+    fps = [Footprint.from_grid(f, dx=10.0, time=float(i))
+           for i, f in enumerate(fields)]
+    s = FootprintSeries(fps)
+    expected = np.nanmean(np.stack(fields), axis=0)
+    got = s.aggregate(smooth=False).f
+    assert np.array_equal(np.isnan(got), np.isnan(expected))
+    assert np.allclose(got[np.isfinite(got)], expected[np.isfinite(expected)],
+                       rtol=1e-12)
+
+
+def test_series_aggregate_all_nan_cell_stays_nan():
+    fps = [Footprint.from_grid(np.full((2, 2), np.nan), dx=10.0, time=float(i))
+           for i in range(2)]
+    clim = FootprintSeries(fps).aggregate(smooth=False)
+    assert np.isnan(clim.f).all()
+
+
+def test_aggregate_stamps_smoothed_and_drops_member_smoothing_attrs():
+    fps = [Footprint.from_grid(np.full((3, 3), float(i + 1)), dx=10.0,
+                               time=float(i), attrs={"smooth_data": 0})
+           for i in range(2)]
+    smoothed = FootprintSeries(fps).aggregate(smooth=True)
+    # The climatology IS smoothed: it must say so, and must not carry the
+    # members' smooth_data=0 (which describes them, not it).
+    assert smoothed.attrs.get("smoothed") == 1
+    assert "smooth_data" not in smoothed.attrs
+    unsmoothed = FootprintSeries(fps).aggregate(smooth=False)
+    assert "smoothed" not in unsmoothed.attrs
+    assert "smooth_data" not in unsmoothed.attrs
+
+
+def test_climatology_series_round_trips_time_none():
+    # Grouped climatologies (calculate_footprint(by=<categorical>)) have no
+    # per-member time labels; the index axis written for the NetCDF layout is
+    # marked structural and must NOT come back as fake relative labels.
+    xr = pytest.importorskip("xarray")
+    fps = [Footprint.from_grid(np.full((2, 2), float(i)), dx=10.0,
+                               attrs={"group": g})
+           for i, g in enumerate(["DJF", "JJA"])]
+    ds = FootprintSeries(fps).to_xarray()
+    assert ds["time"].attrs.get("fluxprint_time") == "index"
+    back = FootprintSeries.from_xarray(ds)
+    assert all(fp.time is None for fp in back)
+    assert all(fp.is_climatology for fp in back)
+
+
+def test_georeferenced_climatology_series_netcdf_round_trip(tmp_path):
+    # Previously: the write succeeded and from_netcdf raised the frame
+    # invariant ("cannot carry a relative time label") — the library could
+    # not read the file it had just written.
+    pytest.importorskip("xarray")
+    fps = [Footprint.from_grid(np.full((2, 2), float(i)), dx=10.0,
+                               crs="EPSG:3035")
+           for i in range(2)]
+    path = tmp_path / "clim_series.nc"
+    FootprintSeries(fps).to_netcdf(str(path))
+    back = FootprintSeries.from_netcdf(str(path))
+    assert back.crs == "EPSG:3035"
+    assert all(fp.time is None for fp in back)
+
+
+def test_mixed_time_labels_warn_and_degrade_to_index():
+    pytest.importorskip("xarray")
+    a = Footprint.from_grid(np.zeros((2, 2)), dx=10.0,
+                            time=datetime(2024, 4, 24))
+    b = Footprint.from_grid(np.zeros((2, 2)), dx=10.0)  # no label
+    with pytest.warns(UserWarning, match="member index"):
+        ds = FootprintSeries([a, b]).to_xarray()
+    back = FootprintSeries.from_xarray(ds)
+    assert all(fp.time is None for fp in back)
+
+
 def test_series_georeference_all_members():
     pytest.importorskip("pyproj")
     s = _series(2)

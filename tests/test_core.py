@@ -165,6 +165,19 @@ def test_on_error_nan_keeps_group_slots():
     assert bad.f.shape == good.f.shape  # same grid: the series stays regular
 
 
+def test_on_error_nan_slots_do_not_share_memory():
+    # Every failed group gets its own field array: editing one NaN slot in
+    # place must not rewrite the others (the template's arrays are copied).
+    df = _frame()
+    df["ustar"] = 0.05                    # both groups fail validation
+    series = core.calculate_footprint(df, by="plot", model="kljun2015",
+                                      on_error="nan", **SMALL)
+    assert series.nt == 2
+    assert series[0].f is not series[1].f
+    series[0].f[0, 0] = 0.0
+    assert np.isnan(series[1].f).all()
+
+
 def test_on_error_raise_aborts_on_invalid_group():
     with pytest.raises(ValueError, match="no valid records"):
         core.calculate_footprint(_poisoned_frame(), by="plot",

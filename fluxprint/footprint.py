@@ -851,7 +851,13 @@ class Footprint:
         return out
 
     def _replace(self, **changes: Any) -> "Footprint":
-        """Return a copy with the given attributes replaced."""
+        """Return a copy with the given attributes replaced.
+
+        ``attrs`` is copied (methods annotate the copy's attrs), but the
+        ``f``/``x``/``y`` arrays are *shared* with the original unless
+        replaced — pass e.g. ``f=self.f.copy()`` before mutating a copy's
+        field in place.
+        """
         current = {
             "f": self.f, "x": self.x, "y": self.y, "time": self.time,
             "crs": self.crs, "tower": self.tower, "tower_crs": self.tower_crs,
@@ -1020,28 +1026,43 @@ class FootprintSeries:
         return np.stack([fp.f for fp in self.footprints])
 
     def aggregate(self, *, smooth: bool = True) -> Footprint:
-        """Collapse the stack to a 2-D climatology (mean over time).
+        """Collapse the stack to a 2-D climatology (nan-mean over time).
 
         Args:
-            smooth: If True, apply the standard 3x3 kernel twice (needs scipy).
+            smooth: If True, apply the standard 3x3 kernel twice (needs
+                scipy). The result records ``attrs["smoothed"]``.
 
         Returns:
             A climatological :class:`Footprint` (``time=None``) on the shared
             grid, with ``n`` summed across members when available.
         """
-        fclim = np.nanmean(self.stack(), axis=0)
+        ref = self.footprints[0]
+        # Incremental nan-mean: one pass with two grid-plane accumulators
+        # instead of materializing the (nt, ny, nx) stack — which peaked at
+        # ~3x the series' memory to produce a single output plane.
+        total = np.zeros(ref.f.shape)
+        finite_counts = np.zeros(ref.f.shape)
+        for fp in self.footprints:
+            finite = np.isfinite(fp.f)
+            total += np.where(finite, fp.f, 0.0)
+            finite_counts += finite
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fclim = total / finite_counts  # 0/0 -> NaN: all-NaN cells stay NaN
         if smooth:
             fclim = smooth_field(fclim)
         counts = [fp.n for fp in self.footprints if fp.n is not None]
-        ref = self.footprints[0]
         # Carry provenance the members agree on (e.g. 'model',
         # 'estimated_inputs') onto the climatology; per-member values (e.g.
         # 'group', 'captured_fraction') are dropped rather than fabricated.
         # 'history' is never equality-carried (member timestamps differ by
         # wall clock); the climatology gets its own fresh entry instead.
+        # Per-member smoothing settings ('smooth_data'/'smoothed') describe
+        # the members, not the climatology — carrying smooth_data=0 onto a
+        # field this method just smoothed would invite a second smoothing
+        # pass downstream, so they are dropped and 'smoothed' stamped fresh.
         attrs = {}
         for key, value in ref.attrs.items():
-            if key == "history":
+            if key in ("history", "smooth_data", "smoothed"):
                 continue
             try:
                 if all(bool(np.all(fp.attrs.get(key) == value))
@@ -1049,6 +1070,8 @@ class FootprintSeries:
                     attrs[key] = value
             except (TypeError, ValueError):
                 continue
+        if smooth:
+            attrs["smoothed"] = 1
         from .version import __version__
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         attrs["history"] = (f"{stamp} aggregated {len(self.footprints)} "
@@ -1098,10 +1121,11 @@ class FootprintSeries:
         counts = [fp.n for fp in self.footprints]
         if all(c is not None for c in counts):
             data["n_records"] = (("time",), np.asarray(counts, dtype="int64"))
+        time_values, time_attrs = _time_axis(self.times)
         ds = xr.Dataset(
             data,
             coords={
-                "time": ("time", _time_axis(self.times)),
+                "time": ("time", time_values, time_attrs),
                 "x": ("x", ref.x, _coord_attrs("x", self.is_georeferenced)),
                 "y": ("y", ref.y, _coord_attrs("y", self.is_georeferenced)),
             },
@@ -1124,12 +1148,17 @@ class FootprintSeries:
         extra = {k: v for k, v in a.items() if k not in _RESERVED_ATTRS}
         counts = ds["n_records"].to_numpy() if "n_records" in ds.variables else None
         times = ds["time"]
+        # A marked index axis is structural, not data: restore time=None so
+        # climatology members stay climatologies (and georeferenced series
+        # remain readable — a relative label would violate the frame invariant).
+        index_axis = times.attrs.get("fluxprint_time") == "index"
         footprints = []
         for i in range(ds.sizes["time"]):
             footprints.append(Footprint(
                 f=ds["footprint"].isel(time=i).to_numpy(),
                 x=ds["x"].to_numpy(), y=ds["y"].to_numpy(),
-                time=_read_time(times.isel(time=i)), **frame,
+                time=None if index_axis else _read_time(times.isel(time=i)),
+                **frame,
                 n=int(counts[i]) if counts is not None else None,
                 attrs=dict(extra)))
         return cls(footprints)
@@ -1154,11 +1183,32 @@ class FootprintSeries:
             return cls.from_xarray(ds)
 
 
-def _time_axis(times: list[datetime | float | None]) -> np.ndarray:
-    """Build a time coordinate array from per-step labels."""
+#: Marker attr on the time coordinate: the axis is a structural member index,
+#: not data — readers must restore ``time=None`` per member.
+_INDEX_AXIS_ATTRS = {"long_name": "member index (no per-member time labels)",
+                     "fluxprint_time": "index"}
+
+
+def _time_axis(times: list[datetime | float | None],
+               ) -> tuple[np.ndarray, dict]:
+    """Build a time coordinate ``(values, attrs)`` from per-step labels.
+
+    All-datetime and all-relative labels are written as themselves. A series
+    with no labels at all (e.g. grouped climatologies from
+    ``calculate_footprint(by=<categorical>)``) needs *some* axis for the
+    NetCDF layout, so a member index is written — marked with
+    ``fluxprint_time="index"`` so :meth:`FootprintSeries.from_xarray`
+    restores ``time=None`` instead of promoting the index to fake relative
+    labels. Mixed labels cannot share one axis: they degrade to the marked
+    index with an explicit warning (the labels are not round-tripped).
+    """
     if all(isinstance(t, datetime) for t in times):
-        return np.array([np.datetime64(t) for t in times])
+        return np.array([np.datetime64(t) for t in times]), {}
     if all(_is_relative_label(t) for t in times):
-        return np.asarray(times, dtype=float)
-    # Mixed/None labels: fall back to an integer index.
-    return np.arange(len(times))
+        return np.asarray(times, dtype=float), {}
+    if any(t is not None for t in times):
+        warnings.warn(
+            "mixed/partial per-member time labels cannot be represented on "
+            "one time axis; writing a member index instead (the labels are "
+            "not round-tripped).", UserWarning, stacklevel=3)
+    return np.arange(len(times)), dict(_INDEX_AXIS_ATTRS)

@@ -356,8 +356,11 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
                     model=model_fn,
                     **{k: call[k] for k in ("domain", "dx", "dy", "nx", "ny")
                        if call.get(k) is not None})
-            fp = nan_template._replace(time=time, n=0,
-                                       tower=tower, tower_crs=tower_crs)
+            # Each slot gets its own field array: _replace shares arrays, and
+            # a series of NaN slots aliasing one buffer would let an in-place
+            # edit of one member silently rewrite all of them.
+            fp = nan_template._replace(f=nan_template.f.copy(), time=time,
+                                       n=0, tower=tower, tower_crs=tower_crs)
             fp.attrs["error"] = failure
         if label is not None:
             if isinstance(label, (pd.Timestamp, datetime)):

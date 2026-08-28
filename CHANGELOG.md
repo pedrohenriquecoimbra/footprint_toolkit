@@ -5,7 +5,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to follow [Semantic Versioning](https://semver.org/)
 (pre-1.0: minor releases may contain breaking changes, announced here).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-28
 
 ### Added
 - Provenance on every model output: `attrs` now carry the fluxprint version,

@@ -264,6 +264,12 @@ def calculate_footprint(data=None, by=None, model="kljun2015", query=None,
     Any estimated inputs are recorded in each footprint's
     ``attrs["estimated_inputs"]``.
 
+    A :class:`FootprintSeries` is eager (one in-memory field per group) and
+    suited to grouped climatologies — tens to hundreds of members. For one
+    footprint per *record* over long records (e.g. years of half-hours),
+    use :func:`fluxprint.map_footprints` instead: it maps the model lazily
+    over dask-chunked arrays and never materializes the whole stack.
+
     Args:
         data: A DataFrame, a dict of equal-length sequences, or a URL string.
         by: Column name (or list of names) to group rows by; ``None`` for one group.
@@ -464,7 +470,8 @@ def wrapper(*args, out_as="nc", dst="", meta=None, aggregate=True,
             if not result.is_georeferenced:
                 raise ValueError(
                     "Georeference the footprint before writing a TIFF: pass "
-                    "tower/tower_crs and call .georeference(target_crs).")
+                    "tower/tower_crs and capture the copy georeference() "
+                    "returns (fp = fp.georeference(target_crs)).")
             result.to_tiff(dst)
         else:
             raise ValueError(f"Unknown out_as={out_as!r}; use 'nc' or 'tif'.")

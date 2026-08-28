@@ -209,12 +209,28 @@ class Footprint:
 
         if self.f.ndim != 2:
             raise ValueError(f"f must be 2-D (ny, nx); got shape {self.f.shape}.")
+        if self.f.size == 0:
+            raise ValueError(
+                "f is empty (a zero-size grid); a footprint needs at least "
+                "one cell.")
         if self.f.shape != (self.y.size, self.x.size):
             raise ValueError(
                 f"f has shape {self.f.shape} but coordinates imply "
                 f"{(self.y.size, self.x.size)} (ny, nx).")
         if not (_is_regular(self.x) and _is_regular(self.y)):
             raise ValueError("x and y must be regularly spaced.")
+        # Ascending axes are part of the grid contract (x west-east, y
+        # south-north): descending coordinates would silently flip the sign
+        # of dx/dy and every cell-area-dependent quantity (total, coverage,
+        # contour levels). Geospatial rasters are typically north-first —
+        # flip before constructing.
+        for name, coord in (("x", self.x), ("y", self.y)):
+            if coord.size > 1 and coord[1] <= coord[0]:
+                raise ValueError(
+                    f"{name} must be ascending "
+                    f"({'west-east' if name == 'x' else 'south-north'}); "
+                    "for a north-first raster flip the field and coordinate "
+                    "first (f=f[::-1], y=y[::-1]).")
         if self.crs is not None and _is_relative_label(self.time):
             raise ValueError(
                 "a georeferenced footprint (crs set) cannot carry a relative "
@@ -601,10 +617,11 @@ class Footprint:
     def georeference(self, target_crs: str | None = None) -> "Footprint":
         """Place the tower-centred grid into a projected CRS (local -> real).
 
-        The local grid is translated so the tower sits at its real projected
-        position; local axes are assumed aligned with the target axes, standard
-        for the sub-kilometre domains footprints cover. Requires ``tower`` and
-        ``tower_crs``.
+        Returns a **new** footprint; ``self`` is unchanged — capture the
+        result (``fp = fp.georeference(...)``). The local grid is translated
+        so the tower sits at its real projected position; local axes are
+        assumed aligned with the target axes, standard for the sub-kilometre
+        domains footprints cover. Requires ``tower`` and ``tower_crs``.
 
         Args:
             target_crs: Projected CRS for the output. When omitted, a
@@ -726,7 +743,7 @@ class Footprint:
         if not self.is_georeferenced:
             raise ValueError(
                 "Footprint must be georeferenced before writing a TIFF; "
-                "call .georeference(target_crs) first.")
+                "georeference() returns a copy: fp = fp.georeference(crs).")
 
         west = self.x.min() - self.dx / 2
         north = self.y.max() + self.dy / 2
@@ -830,8 +847,19 @@ class Footprint:
         return str(value)
 
     def _serializable_attrs(self) -> dict[str, Any]:
+        # The frame fields (crs/tower/n) are authoritative: a user attr named
+        # e.g. "crs" must not end up in the file, where a reader would
+        # promote it to the real coordinate system.
+        shadowed = sorted(k for k, v in self.attrs.items()
+                          if k in _FRAME_ATTRS and v is not None)
+        if shadowed:
+            warnings.warn(
+                f"attrs {shadowed} shadow reserved frame metadata and are "
+                "not serialized; the footprint's own crs/tower/n fields are "
+                "authoritative.", UserWarning, stacklevel=3)
         out = {k: self._coerce_attr(v)
-               for k, v in self.attrs.items() if v is not None}
+               for k, v in self.attrs.items()
+               if v is not None and k not in _FRAME_ATTRS}
         if self.crs is not None:
             out.setdefault("crs", self.crs)
             try:  # enrich with wkt/proj4 when pyproj is available
@@ -850,14 +878,20 @@ class Footprint:
             out.setdefault("n_records", self.n)
         return out
 
-    def _replace(self, **changes: Any) -> "Footprint":
-        """Return a copy with the given attributes replaced.
+    def replace(self, **changes: Any) -> "Footprint":
+        """Return a copy with the given fields replaced (variant constructor).
 
-        ``attrs`` is copied (methods annotate the copy's attrs), but the
-        ``f``/``x``/``y`` arrays are *shared* with the original unless
-        replaced — pass e.g. ``f=self.f.copy()`` before mutating a copy's
-        field in place.
+        E.g. ``fp.replace(time=None)`` or ``fp.replace(f=new_field)``.
+        ``attrs`` is copied, so the copy can be annotated without touching
+        the original; the ``f``/``x``/``y`` arrays are *shared* unless
+        replaced — pass ``f=fp.f.copy()`` before mutating a copy's field in
+        place. Prefer this over :func:`dataclasses.replace`, which would
+        share the ``attrs`` dict between the copies.
         """
+        return self._replace(**changes)
+
+    def _replace(self, **changes: Any) -> "Footprint":
+        """Internal spelling of :meth:`replace` (kept for existing callers)."""
         current = {
             "f": self.f, "x": self.x, "y": self.y, "time": self.time,
             "crs": self.crs, "tower": self.tower, "tower_crs": self.tower_crs,
@@ -870,8 +904,13 @@ class Footprint:
 # --------------------------------------------------------------------------- #
 # Shared NetCDF attribute helpers                                             #
 # --------------------------------------------------------------------------- #
-_RESERVED_ATTRS = {"crs", "tower_x", "tower_y", "tower_crs", "n_records",
-                   "Conventions"}
+#: Frame metadata written from the typed fields, never from user attrs
+#: (colliding user attrs warn and are dropped at serialization).
+_FRAME_ATTRS = frozenset({"crs", "crs_wkt", "crs_proj4", "tower_x", "tower_y",
+                          "tower_crs", "n_records"})
+#: Keys stripped from global attrs on read (frame metadata + file-level
+#: markers); everything else round-trips into ``attrs``.
+_RESERVED_ATTRS = _FRAME_ATTRS | {"Conventions"}
 
 
 def _pack_footprint(ds: "xr.Dataset", decimals: int, dtype: str = "int32") -> "xr.Dataset":
@@ -975,12 +1014,27 @@ class FootprintSeries:
             raise ValueError("FootprintSeries requires at least one footprint.")
         ref = footprints[0]
         for fp in footprints[1:]:
-            if fp.f.shape != ref.f.shape or not np.allclose(fp.x, ref.x) \
-                    or not np.allclose(fp.y, ref.y):
-                raise ValueError("All footprints must share the same grid.")
-            if fp.crs != ref.crs:
-                raise ValueError("All footprints must share the same crs.")
+            self._check_member(fp, ref)
         self.footprints = list(footprints)
+
+    @staticmethod
+    def _check_member(fp: Footprint, ref: Footprint) -> None:
+        """The series invariant: one shared grid, one shared frame."""
+        if fp.f.shape != ref.f.shape or not np.allclose(fp.x, ref.x) \
+                or not np.allclose(fp.y, ref.y):
+            raise ValueError("All footprints must share the same grid.")
+        if fp.crs != ref.crs:
+            raise ValueError("All footprints must share the same crs.")
+
+    def append(self, fp: Footprint) -> None:
+        """Append a footprint after validating it shares the grid and frame.
+
+        Use this — not ``series.footprints.append`` — to grow a series:
+        direct list mutation bypasses the shared-grid/shared-crs validation
+        and defers the failure to an unrelated call site.
+        """
+        self._check_member(fp, self.footprints[0])
+        self.footprints.append(fp)
 
     def __len__(self) -> int:
         return len(self.footprints)
@@ -988,8 +1042,22 @@ class FootprintSeries:
     def __iter__(self) -> Iterator[Footprint]:
         return iter(self.footprints)
 
-    def __getitem__(self, i: int) -> Footprint:
+    def __getitem__(self, i: int | slice) -> "Footprint | FootprintSeries":
+        """Member at ``i``, or a sub-series for a slice."""
+        if isinstance(i, slice):
+            sliced = self.footprints[i]
+            if not sliced:
+                raise ValueError(
+                    f"slice {i!r} selects no members; a FootprintSeries "
+                    "cannot be empty.")
+            return FootprintSeries(sliced)
         return self.footprints[i]
+
+    def __repr__(self) -> str:
+        ref = self.footprints[0]
+        frame = self.crs if self.is_georeferenced else "local"
+        return (f"<FootprintSeries nt={self.nt} "
+                f"grid={ref.ny}x{ref.nx} frame={frame!r}>")
 
     @property
     def nt(self) -> int:
@@ -1084,6 +1152,7 @@ class FootprintSeries:
     def georeference(self, target_crs: str | None = None) -> "FootprintSeries":
         """Georeference every member onto the same projected grid.
 
+        Returns a **new** series; ``self`` is unchanged — capture the result.
         Computes the translation once from the shared tower position and applies
         it to all members. ``target_crs`` defaults to a tower-centred LAEA
         (:func:`laea_crs`). Requires ``datetime`` timestamps on every member.

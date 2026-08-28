@@ -190,7 +190,9 @@ their original implementation — CI enforces this.
   — footprint each group of a table; returns a `FootprintSeries`.
   `on_error` decides what a failed group costs: drop it (`"skip"`), abort
   (`"raise"`), or keep an all-NaN member with the reason in `attrs["error"]`
-  (`"nan"`).
+  (`"nan"`). The series is eager — right for grouped climatologies (tens to
+  hundreds of members); for one footprint per record over long records,
+  use `map_footprints` below instead.
 - `map_footprints(data, model="kljun2015", ...)` — the xarray/dask-native
   compute path: maps the model's per-record kernel over arrays of any
   dimensionality and returns a `DataArray` with dims `(*input_dims, y, x)`.
@@ -226,6 +228,8 @@ their original implementation — CI enforces this.
 - `weighted_mean(field, min_coverage=None)` — footprint-weighted mean of a
   gridded quantity; owns the NaN mask and the coverage threshold, and returns
   a uniform field unchanged whatever the normalization or truncation.
+- `replace(**changes)` — variant constructor (`fp.replace(time=None)`);
+  copies `attrs`, shares the arrays unless replaced.
 - `plot(rs=None)` — matplotlib quick look (never calls `plt.show()`).
 - `to_netcdf` / `from_netcdf`, `to_tiff` / `from_tiff`, `to_xarray` /
   `from_xarray`, `to_shapefile`.

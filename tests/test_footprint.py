@@ -225,6 +225,77 @@ def test_series_basics():
     assert s[1].time == datetime(2024, 4, 24, 1)
 
 
+def test_series_slicing_returns_a_series():
+    s = _series(3)
+    sub = s[1:3]
+    assert isinstance(sub, FootprintSeries)
+    assert sub.nt == 2
+    assert sub.aggregate(smooth=False).is_climatology
+    assert isinstance(s[0], Footprint)     # integer indexing unchanged
+    with pytest.raises(ValueError, match="selects no members"):
+        s[3:]
+
+
+def test_series_append_validates_grid_and_frame():
+    s = _series(2)
+    s.append(s[0].replace(time=datetime(2024, 4, 24, 5)))
+    assert s.nt == 3
+    with pytest.raises(ValueError, match="same grid"):
+        s.append(Footprint.from_grid(np.zeros((3, 3)), dx=10.0))
+    with pytest.raises(ValueError, match="same crs"):
+        s.append(s[0].replace(crs="EPSG:3035"))
+
+
+def test_series_repr_is_informative():
+    assert "nt=2" in repr(_series(2))
+    assert "local" in repr(_series(2))
+
+
+def test_replace_is_public_and_copies_attrs():
+    fp = _toy()
+    fp.attrs["note"] = "original"
+    copy = fp.replace(time=5.0)
+    copy.attrs["note"] = "changed"
+    assert fp.attrs["note"] == "original"  # attrs copied
+    assert copy.time == 5.0
+    assert copy.f is fp.f                  # arrays shared by contract
+
+
+def test_descending_axes_rejected():
+    with pytest.raises(ValueError, match="ascending"):
+        Footprint(f=np.zeros((1, 3)), x=np.array([2.0, 1.0, 0.0]),
+                  y=np.array([0.0]))
+    with pytest.raises(ValueError, match="ascending"):
+        Footprint(f=np.zeros((3, 1)), x=np.array([0.0]),
+                  y=np.array([2.0, 1.0, 0.0]))
+
+
+def test_empty_field_rejected():
+    with pytest.raises(ValueError, match="empty"):
+        Footprint(f=np.zeros((0, 0)), x=np.array([]), y=np.array([]))
+
+
+def test_attrs_shadowing_frame_keys_warn_and_do_not_serialize():
+    pytest.importorskip("xarray")
+    fp = _toy()
+    fp.attrs["crs"] = "just a note"
+    with pytest.warns(UserWarning, match="shadow reserved frame"):
+        ds = fp.to_xarray()
+    assert "crs" not in ds.attrs           # local frame: no crs key at all
+    back = Footprint.from_xarray(ds)
+    assert back.crs is None                # the note never became the frame
+
+
+def test_frame_attrs_do_not_accumulate_across_round_trips():
+    pytest.importorskip("xarray")
+    pytest.importorskip("pyproj")
+    fp = _toy().georeference("EPSG:3035")
+    back = Footprint.from_xarray(fp.to_xarray())
+    assert "crs_wkt" not in back.attrs and "crs_proj4" not in back.attrs
+    back2 = Footprint.from_xarray(back.to_xarray())    # second trip is clean
+    assert back2.crs == fp.crs
+
+
 def test_series_aggregate_means_and_sums_counts():
     s = _series(3)                       # fields 0, 1, 2 -> mean 1.0
     clim = s.aggregate(smooth=False)

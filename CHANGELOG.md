@@ -69,7 +69,23 @@ step (CI-enforced).
   The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
   generic `Footprint.weighted_mean()`.
 
+### Added
+- `FootprintSeries` is a real container now: slicing returns a
+  `FootprintSeries` (previously a bare list), `append()` grows a series with
+  the shared-grid/shared-frame validation applied (direct
+  `series.footprints.append` bypasses it), and the series has an
+  informative `repr`.
+- `Footprint.replace(**changes)`: the public variant constructor (copies
+  `attrs`; shares arrays unless replaced). `_replace` remains as the
+  internal spelling.
+
 ### Fixed
+- User attrs that shadow reserved frame metadata (`crs`, `crs_wkt`,
+  `crs_proj4`, `tower_x`, `tower_y`, `tower_crs`, `n_records`) now warn and
+  are dropped at serialization instead of overriding the real frame — a
+  note like `attrs["crs"] = "WGS84"` could previously become the
+  authoritative CRS on reload. `crs_wkt`/`crs_proj4` also no longer
+  reappear as user attrs after a round-trip.
 - A series with no per-member time labels (e.g. grouped climatologies from
   `calculate_footprint(by=<categorical>)`) now writes a *marked* index time
   axis, and `from_xarray`/`from_netcdf` restore `time=None` instead of
@@ -86,6 +102,13 @@ step (CI-enforced).
   footprint-widening smoothing pass downstream.
 
 ### Changed
+- `Footprint` construction now rejects descending or empty coordinate axes
+  with an actionable error (flip north-first rasters before constructing);
+  previously a descending axis silently flipped the sign of `dx`/`dy` and
+  every cell-area-dependent quantity (`total()`, coverage, contour levels).
+- `calculate_footprint`'s docs (and the README) now state the eager-series
+  vs `map_footprints` division of labor: series for grouped climatologies,
+  the mapped path for one-footprint-per-record at scale.
 - `FootprintSeries.aggregate()` computes the climatology incrementally (two
   grid-plane accumulators, one pass) instead of materializing the full
   `(nt, ny, nx)` stack plus nanmean's internal copies — peak memory for the

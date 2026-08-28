@@ -216,7 +216,15 @@ def test_legacy_write_netcdf_accepts_footprint(tmp_path):
     with pytest.warns(DeprecationWarning, match="write_to_file") as record:
         io.write_to_file(fp, str(path))
     # One warning, naming the function the user called - not the dispatchee.
-    assert len([w for w in record if w.category is DeprecationWarning]) == 1
+    # Count only fluxprint's own deprecations: the netCDF write path can emit
+    # unrelated DeprecationWarnings from numpy/xarray internals (e.g. numpy
+    # 2.5's "setting the shape on an array" notice via xarray's netCDF4
+    # backend), which are not this test's subject.
+    ours = [w for w in record
+            if w.category is DeprecationWarning
+            and str(w.message).startswith("fluxprint.")]
+    assert len(ours) == 1, [str(w.message) for w in ours]
+    assert "write_to_file" in str(ours[0].message)
     out = Footprint.from_netcdf(str(path))
     assert np.allclose(out.f, fp.f, atol=1e-12)
 

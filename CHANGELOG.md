@@ -68,8 +68,6 @@ step (CI-enforced).
   distance, Detto Eq B4 crosswind spread) in `tests/test_hsieh_reference.py`.
   The draft's `patch_index`/`patch_ffp` helpers are gone — superseded by the
   generic `Footprint.weighted_mean()`.
-
-### Added
 - `FootprintSeries` is a real container now: slicing returns a
   `FootprintSeries` (previously a bare list), `append()` grows a series with
   the shared-grid/shared-frame validation applied (direct

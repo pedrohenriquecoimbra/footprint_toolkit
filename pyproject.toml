@@ -63,7 +63,9 @@ crs = ["pyproj"]
 shapefile = ["fiona", "shapely"]
 viz = ["folium"]
 all = ["xarray", "netcdf4", "rasterio", "pyproj", "fiona", "shapely", "folium"]
-dev = ["pytest", "rioxarray"]  # rioxarray: the CF grid-mapping interop test
+# rioxarray: the CF grid-mapping interop test. dask: the lazy map_footprints
+# path (its test skips without it, so CI would silently not cover it).
+dev = ["pytest", "rioxarray", "dask"]
 icoscp = ["icoscp", "icoscp_core"]
 
 [project.urls]

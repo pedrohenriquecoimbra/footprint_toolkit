@@ -32,6 +32,28 @@ A model is a keyword-only callable returning one local-frame `Footprint`
 4. validate inputs per record (reject NaN/None; see
    `exceptions.check_ffp_inputs`).
 
+## Cutting a release
+
+1. Bump `fluxprint/version.py`, and `CITATION.cff` (`version` +
+   `date-released`); date the release's heading in `CHANGELOG.md`.
+2. Commit, then tag and push:
+
+   ```bash
+   git tag -a v0.4.0 -m "fluxprint 0.4.0" && git push origin v0.4.0
+   ```
+
+The `publish` workflow takes it from there: it refuses to continue if the tag
+does not match `version.py`, builds the sdist and wheel, runs the whole suite
+**against the built wheel** (plus the model reference-equivalence check), and
+uploads to PyPI via Trusted Publishing. Pre-release versions are fine — a
+`v0.4.0a1` tag publishes an alpha that plain `pip install fluxprint` will not
+pick up. For a dry run without tagging, use Actions → publish → Run workflow →
+target `testpypi`.
+
+Trusted Publishing needs a one-time setup on PyPI (project → Publishing → add
+a GitHub publisher for `publish.yml`, environment `pypi`); the workflow header
+documents the exact fields.
+
 ## Conventions
 
 - Behavior changes and deprecations go into `CHANGELOG.md` (Keep-a-Changelog).

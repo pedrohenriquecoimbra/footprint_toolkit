@@ -99,7 +99,18 @@ step (CI-enforced).
   `smooth_data=0` onto a field it just smoothed — which invited a second,
   footprint-widening smoothing pass downstream.
 
+### Added
+- Release pipeline (`.github/workflows/publish.yml`): pushing a `vX.Y.Z` tag
+  builds the sdist and wheel, refuses to continue if the tag does not match
+  `fluxprint/version.py`, runs the full suite **against the built wheel** on
+  3.10/3.13 (from outside the repo, so the source tree cannot shadow the
+  installed package) plus the model reference-equivalence check, then
+  uploads via PyPI Trusted Publishing (OIDC - no stored token). A manual
+  `workflow_dispatch` run can target TestPyPI for a dry run.
+
 ### Changed
+- `dask` added to the `dev` extra: the lazy `map_footprints` test skips
+  without it, so CI was not actually exercising the dask path.
 - The `regorator` upper bound (`<0.3`) is dropped: fluxprint uses a
   two-function surface that is stable across regorator releases, and an
   upper cap on a library dependency only creates resolver conflicts

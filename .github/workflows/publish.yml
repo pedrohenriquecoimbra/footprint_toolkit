@@ -1,0 +1,129 @@
+name: publish
+
+# Cutting a release
+# -----------------
+#   1. Bump fluxprint/version.py (and CITATION.cff version + date-released).
+#   2. git tag -a vX.Y.Z -m "fluxprint X.Y.Z" && git push origin vX.Y.Z
+#
+# The tag must match fluxprint/version.py exactly - the guard below fails the
+# release rather than publishing a mislabeled artifact (the mistake that gave
+# the repo a v0.2 tag pointing at a 0.0.2 tree). Pre-release versions work as
+# they are: a v0.4.0a1 tag publishes an alpha that `pip install fluxprint`
+# will not pick up without `--pre`.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) - no API token is stored in
+# this repository. ONE-TIME SETUP, required before the first tag push:
+#   on pypi.org      -> project -> Publishing -> add a GitHub publisher with
+#                       owner: pedrohenriquecoimbra, repository: FluxPrint,
+#                       workflow: publish.yml, environment: pypi
+#   on test.pypi.org -> the same, with environment: testpypi
+# Add a required reviewer to the `pypi` environment (Settings -> Environments)
+# if you want a human approval step between the green build and the upload.
+#
+# Dry run without tagging: Actions -> publish -> Run workflow -> target
+# testpypi.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to"
+        type: choice
+        options: ["testpypi", "pypi"]
+        default: "testpypi"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag must match fluxprint/version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(python -c "ns = {}; exec(open('fluxprint/version.py').read(), ns); print(ns['version'])")
+          if [ "refs/tags/v$version" != "$GITHUB_REF" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match fluxprint/version.py (expected refs/tags/v$version)"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches version v$version"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check package metadata
+        run: python -m twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Test the artifact that is about to be published, not the source tree:
+  # install the wheel and run the suite from outside the repository, so the
+  # local `fluxprint/` directory cannot shadow the installed package.
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Install the built wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl pytest rioxarray dask
+
+      - name: Run the test suite against the installed wheel
+        run: |
+          mkdir -p "$RUNNER_TEMP/verify"
+          cp -r tests "$RUNNER_TEMP/verify/"
+          cd "$RUNNER_TEMP/verify"
+          python -m pytest tests -q
+
+      - name: Models still reproduce their reference implementations exactly
+        run: |
+          cd "$RUNNER_TEMP/verify"
+          python -m pytest tests/test_reference_regression.py -v
+
+  publish:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.target) || 'pypi' }}
+    permissions:
+      id-token: write # OIDC token for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
